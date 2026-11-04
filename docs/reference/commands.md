@@ -117,6 +117,9 @@ $ iets eval --impure $nixpkgs -A hello.name
 - A required argument that you leave out is the error
   `cannot evaluate a function that has an argument without a value ('NAME')`.
 - A function whose arguments end in `...` gets every `--arg`, named or not.
+- A set with `__functor`, which is what `callPackage` returns for a
+  function, is called with itself, and what that returns is called as
+  above.
 
 Without an attribute path, the top level is called only when you give an
 `--arg`, as `nix eval -f FILE` does. Classic mode, `search` and every
