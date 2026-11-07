@@ -13,6 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: build
-        run: rustc -O probe.rs -o probe
+        shell: bash
+        run: rustc -O probe.rs && ls -la probe*
       - name: probe (1000 sleeps of 50 ms, twice)
+        shell: bash
         run: ./probe 1000
