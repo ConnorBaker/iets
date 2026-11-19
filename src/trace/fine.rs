@@ -21,6 +21,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::env;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, Read, Write as _};
@@ -1836,35 +1837,39 @@ fn roots(s: &mut State, v: Word) -> Vec<u32> {
 /// Writes the trace of the whole run to the file `IETS_FINE_TRACE` named.
 /// When `v` is a list, writes the trace of each element to `DIR/INDEX` for
 /// `IETS_FINE_JOBS=DIR`, and the trace graph to `IETS_FINE_DAG=DIR`.
-pub fn dump(ev: &Evaluator, v: Option<Word>) {
+/// Returns whether all requested writes succeeded; each error names its path.
+#[must_use]
+pub fn dump(ev: &Evaluator, v: Option<Word>) -> bool {
     with(|s| {
+        let mut written = true;
+        let mut check = |path: &Path, result: io::Result<()>| {
+            if let Err(e) = result {
+                errln!("fine trace: writing {}: {e}", path.display());
+                written = false;
+            }
+        };
         if let Some(p) = &s.out {
             let all = s.flatten(&s.log[s.frames[0].0..]);
-            if let Err(e) = std::fs::write(p, s.text(ev, &all)) {
-                errln!("fine trace: writing {}: {e}", p.display());
-            }
+            check(p, fs::write(p, s.text(ev, &all)));
         }
         let roots = v.map(|v| roots(s, v)).unwrap_or_default();
-        if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
+        if let Some(dir) = env::var_os("IETS_FINE_JOBS") {
             for (i, t) in roots.iter().enumerate() {
                 let obs = if *t == 0 {
                     Vec::new()
                 } else {
                     s.flatten(&[EDGE | t])
                 };
-                let p = std::path::Path::new(&dir).join(i.to_string());
+                let p = Path::new(&dir).join(i.to_string());
                 let mut text = s.text(ev, &obs);
                 text.push_str("V\tlist-control-v1\n");
                 text.push_str(OUTPUT_VERSION);
-                if let Err(e) = std::fs::write(&p, text) {
-                    errln!("fine trace: writing {}: {e}", p.display());
-                }
+                check(&p, fs::write(&p, text));
             }
         }
-        if let Some(dir) = std::env::var_os("IETS_FINE_DAG")
-            && let Err(e) = s.write_dag(ev, std::path::Path::new(&dir), &roots)
-        {
-            errln!("fine trace: writing {}: {e}", dir.display());
+        if let Some(dir) = env::var_os("IETS_FINE_DAG") {
+            let path = Path::new(&dir);
+            check(path, s.write_dag(ev, path, &roots));
         }
         errln!(
             "fine trace: {} frames, {} words of traces, {} observations, {} provenances",
@@ -1873,7 +1878,8 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
             s.obs.len(),
             s.provs.len()
         );
-    });
+        written
+    })
 }
 
 fn kind_name(k: Kind) -> &'static str {

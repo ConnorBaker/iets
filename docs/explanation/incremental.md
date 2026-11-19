@@ -110,6 +110,11 @@ drivers check both the original graphs and the newly recorded batches with
 node headers and reports when evaluation requires the original batch in its
 original order. Other uses of `fine-check` still report changed job indices.
 
+An `iets eval` with `IETS_FINE_TRACE` set evaluates the request even when
+its rendered result is already cached. Check the command's exit status
+before consuming any requested trace files. A write failure reports the
+destination and fails the command even if it already printed its result.
+
 ## Results
 
 These measurements predate the comparison-order guard. They were made on bld1 (32 cores, 125 GB), at one worker per process,
