@@ -21,11 +21,13 @@
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::fs;
+use std::io::{self, ErrorKind};
 use std::panic::Location;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
-use std::{io, mem};
+use std::mem;
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
@@ -937,6 +939,11 @@ pub fn position(path: &[u8], off: u32) {
     with(|s| s.record(O::Pos(path.into(), off)));
 }
 
+/// A force whose outside input cannot be validated on a later run.
+pub fn volatile() {
+    with(|s| s.record(O::Out("R\t?\tvolatile\t".into())));
+}
+
 /// What the tracing cache records.
 pub fn outside(o: &Obs) {
     let line = match o {
@@ -1582,6 +1589,7 @@ impl State {
             out.push_str(l);
             out.push('\n');
         }
+        out.push_str(VOLATILE_VERSION);
         out
     }
 
@@ -1604,6 +1612,7 @@ impl State {
         // Unreachable as an observation. An older writer also overwrites
         // this file when it records into a previously used directory.
         o.push_str(OUTPUT_VERSION);
+        o.push_str(VOLATILE_VERSION);
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
@@ -1902,6 +1911,8 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
+const VOLATILE_VERSION: &str = "V\tvolatile-v1\n";
+
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
     Ok(std::fs::read(path)?
         .as_chunks::<4>()
@@ -1915,6 +1926,9 @@ const OUTPUT_VERSION: &str = "V\tjob-output-v1\n";
 
 fn read_observations(dir: &Path) -> io::Result<String> {
     let mut obs = std::fs::read_to_string(dir.join("obs"))?;
+    if !obs.ends_with(VOLATILE_VERSION) {
+        return Err(io::Error::new(ErrorKind::InvalidData, "regenerate the fine graph to record uncacheable forces"));
+    }
     if !obs.ends_with(OUTPUT_VERSION) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
