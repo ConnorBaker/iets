@@ -1002,6 +1002,11 @@ pub fn introspection() {
     }
 }
 
+/// A force whose outside input cannot be validated on a later run.
+pub fn volatile() {
+    with(|s| s.record(O::Out("R\t?\tvolatile\t".into())));
+}
+
 /// What the tracing cache records.
 pub fn outside(o: &Obs) {
     let line = match o {
@@ -1679,6 +1684,7 @@ impl State {
             out.push_str(l);
             out.push('\n');
         }
+        out.push_str(VOLATILE_VERSION);
         out
     }
 
@@ -1706,6 +1712,7 @@ impl State {
         }
         // Unreachable as an observation. An older writer also overwrites
         // this file when it records into a previously used directory.
+        o.push_str(VOLATILE_VERSION);
         o.push_str(OUTPUT_VERSION);
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
@@ -2121,6 +2128,7 @@ fn read_roots(dir: &Path) -> io::Result<Vec<u32>> {
         .collect()
 }
 
+const VOLATILE_VERSION: &str = "V\tvolatile-v1\n";
 const OUTPUT_VERSION: &str = "V\tjob-output-v1\n";
 
 fn read_observations(dir: &Path) -> io::Result<String> {
@@ -2132,6 +2140,13 @@ fn read_observations(dir: &Path) -> io::Result<String> {
         ));
     }
     obs.truncate(obs.len() - OUTPUT_VERSION.len());
+    if !obs.ends_with(VOLATILE_VERSION) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "regenerate the fine graph to record uncacheable forces",
+        ));
+    }
+    obs.truncate(obs.len() - VOLATILE_VERSION.len());
     Ok(obs)
 }
 
