@@ -60,8 +60,9 @@ are held out. This initial mix emphasizes server evaluation and its cache paths.
 There are no explicit weights or workload normalization. LLVM merges raw counts
 with `llvm-profdata merge -failure-mode=any`; BOLT replays training on the PGO
 executable and combines its separate instrumentation profiles with `merge-fdata`.
-It does not convert LLVM or Callgrind profiles. Both stages require at least nine
-nonempty raw files and exact stdout parity with the production evaluator. Profile
+It does not convert LLVM or Callgrind profiles. Both stages require each workload to emit a nonempty
+profile and label every raw file with its workload before merging. They also
+check stdout parity with the production evaluator. Profile
 inputs depend on their executable, source, workloads and tools; changes rebuild
 them. Cached build-time training is not a performance measurement.
 

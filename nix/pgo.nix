@@ -61,6 +61,7 @@ let
     set -euo pipefail
     binary=$1
     output=$2
+    profilePrefix=''${3-}
     mkdir -p "$output"
     work=$(mktemp -d "$TMPDIR/iets-training.XXXXXX")
     export HOME="$work/home" XDG_CACHE_HOME="$work/cache"
@@ -71,6 +72,16 @@ let
       shift
       echo "training: $name" >&2
       "$binary" "$@" > "$output/$name.out"
+      if [[ -n "$profilePrefix" ]]; then
+        # A glob with no match stays literal, so a missing profile fails here.
+        for raw in "$profilePrefix"*; do
+          if ! test -s "$raw"; then
+            echo "training: $name produced a missing or empty profile: $raw" >&2
+            exit 1
+          fi
+          mv "$raw" "$out/raw/''${raw%.*}-$name.''${raw##*.}"
+        done
+      fi
     }
     for workers in 1 4; do
       run "server-w$workers" eval --impure --strict --no-cache --workers "$workers" \
@@ -94,15 +105,11 @@ let
     mkdir -p $out/raw
     # %m keeps counters from separate images distinct; %p avoids concurrent
     # writers. The directory is private to this derivation's build sandbox.
-    export LLVM_PROFILE_FILE="$out/raw/%m-%p.profraw"
-    ${training} ${instrumented}/bin/iets $out/results
+    export LLVM_PROFILE_FILE="$PWD/llvm-%m-%p.profraw"
+    ${training} ${instrumented}/bin/iets $out/results llvm-
     unset LLVM_PROFILE_FILE
     ${training} ${iets}/bin/iets reference
     diff -r reference $out/results
-    # Every one of the nine invocations must flush a profile, and no corrupt
-    # input may be silently discarded by the merge.
-    test "$(find $out/raw -name '*.profraw' -type f | wc -l)" -ge 9
-    for raw in $out/raw/*.profraw; do test -s "$raw"; done
     llvm-profdata merge -failure-mode=any -o $out/merged.profdata $out/raw/*.profraw
     llvm-profdata show $out/merged.profdata > $out/summary.txt
     sha256sum ${instrumented}/bin/iets > $out/instrumented.sha256
@@ -119,11 +126,8 @@ let
     nativeBuildInputs = [ bolt diffutils ];
   } ''
     mkdir -p $out/raw
-    ${training} ${boltInstrumented}/bin/iets $out/results
+    ${training} ${boltInstrumented}/bin/iets $out/results bolt-profile.
     diff -r ${profile}/results $out/results
-    find . -name 'bolt-profile*' -type f -exec cp '{}' $out/raw/ \;
-    test "$(find $out/raw -type f | wc -l)" -ge 9
-    for raw in $out/raw/*; do test -s "$raw"; done
     merge-fdata $out/raw/* > $out/merged.fdata
     test -s $out/merged.fdata
   '';
