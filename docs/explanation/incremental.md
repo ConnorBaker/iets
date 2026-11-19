@@ -115,6 +115,13 @@ its rendered result is already cached. Check the command's exit status
 before consuming any requested trace files. A write failure reports the
 destination and fails the command even if it already printed its result.
 
+Each validation step rechecks jobs that read the process environment, ask
+an SCM about its working tree, use a fetched input's local store entry, or
+observe the latest mtime of a source tree. A Git diff supplies none of
+those values. The graph and each text job trace carry a version record for
+these reads. Record old graphs again so each reader of an open input has
+its own evidence. The flat-text checker marks older jobs dirty.
+
 ## Results
 
 These measurements predate the comparison-order guard. They were made on bld1 (32 cores, 125 GB), at one worker per process,

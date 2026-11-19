@@ -27,17 +27,20 @@ function entries(e, name, why,    n, x, i, y) {
 function flush(   s) {
   if (job != "") {
     if (!order_version) for (s in step) inv[s] = "legacy trace"
+    if (!external_version) for (s in step) inv[s] = "missing external read evidence"
     if (!list_control) for (s in step) inv[s] = "missing list control trace"
     if (!trace_version) { print "regenerate job traces" > "/dev/stderr"; failed = 1 }
     if (!volatile_format) { print "regenerate the job trace to record uncacheable forces" > "/dev/stderr"; failed = 1 }
     if (!output_version) { print "regenerate the fine job trace for " job " to record job output demands" > "/dev/stderr"; failed = 1 }
     for (s in inv) print job, s, inv[s]
   }
-  delete inv; delete pc; volatile_format = 0; trace_version = 0; order_version = 0; output_version = 0; list_control = 0
+  delete inv; delete pc; external_version = 0; volatile_format = 0; trace_version = 0; order_version = 0; output_version = 0; list_control = 0
 }
 $1 == "J" { flush(); job = $2; next }
 $1 == "R" && $2 == "?" { for (s in step) inv[s] = "untracked " $3; next }
 $1 == "V" && $2 == "2" { trace_version = 1; next }
+$0 == "V\texternal-reads-v1" { external_version = 1; next }
+$1 == "E" || $1 == "Q" || $1 == "I" || $1 == "TreeMtime" { for (s in step) inv[s] = "external read " $1; next }
 $0 == "V\tvolatile-v1" { volatile_format = 1; next }
 $0 == "V\tjob-output-v1" { output_version = 1; next }
 $0 == "V\tlist-control-v1" { list_control = 1; next }
