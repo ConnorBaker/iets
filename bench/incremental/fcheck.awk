@@ -2,7 +2,7 @@
 # fchg.all holds "step\tchange" lines; TRACES holds "J\tjob" and then the job's trace.
 # skip drops the whole reads (A) whose Nix call or stack matches it: what a fix at those sites would give.
 BEGIN { FS = OFS = "\t" }
-NR == FNR {
+FILENAME == ARGV[1] {
   s = $1
   step[s] = 1
   if ($2 == "V" && $3 == "2") version[s] = 1
@@ -28,13 +28,15 @@ function flush(   s) {
   if (job != "") {
     if (!order_version) for (s in step) inv[s] = "legacy trace"
     if (!trace_version) { print "regenerate job traces" > "/dev/stderr"; failed = 1 }
+    if (!output_version) { print "regenerate the fine job trace for " job " to record job output demands" > "/dev/stderr"; failed = 1 }
     for (s in inv) print job, s, inv[s]
   }
-  delete inv; delete pc; trace_version = 0; order_version = 0
+  delete inv; delete pc; trace_version = 0; order_version = 0; output_version = 0
 }
 $1 == "J" { flush(); job = $2; next }
 $1 == "R" && $2 == "?" { for (s in step) inv[s] = "untracked " $3; next }
 $1 == "V" && $2 == "2" { trace_version = 1; next }
+$0 == "V\tjob-output-v1" { output_version = 1; next }
 $1 == "V" && $2 == "attr-order-1" { order_version = 1; next }
 $1 == "AttrOrder" { for (s in step) inv[s] = "attrset comparison order"; next }
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
