@@ -27,11 +27,12 @@ use std::panic::Location;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
+use std::{io, mem};
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
 };
-use crate::eval::Evaluator;
+use crate::eval::{EvalResult, Evaluator};
 use crate::runtime::Word;
 use crate::runtime::value::{Attr, AttrsObj, Value};
 use crate::runtime::word::{TAG_IMM, TAG_INT};
@@ -1758,10 +1759,7 @@ pub fn begin_json_output() {
 
 /// JSON can force descendants, copy a path, or run a set's custom coercion
 /// after the element's own thunk has returned.
-pub fn json_element(
-    w: Word,
-    render: impl FnOnce() -> crate::eval::EvalResult<()>,
-) -> crate::eval::EvalResult<()> {
+pub fn json_element(w: Word, render: impl FnOnce() -> EvalResult<()>) -> EvalResult<()> {
     push();
     let result = render();
     if result.is_ok() {
@@ -1799,7 +1797,7 @@ fn roots(s: &mut State, v: Word) -> Vec<u32> {
         return Vec::new();
     };
     if s.json_elements.len() == l.len as usize {
-        return std::mem::take(&mut s.json_elements)
+        return mem::take(&mut s.json_elements)
             .into_iter()
             .map(|t| join(&mut s.nodes, parent, t))
             .collect();
@@ -2117,11 +2115,11 @@ fn read_roots(dir: &std::path::Path) -> std::io::Result<Vec<u32>> {
 
 const OUTPUT_VERSION: &str = "V\tjob-output-v1\n";
 
-fn read_observations(dir: &std::path::Path) -> std::io::Result<String> {
+fn read_observations(dir: &Path) -> io::Result<String> {
     let mut obs = std::fs::read_to_string(dir.join("obs"))?;
     if !obs.ends_with(OUTPUT_VERSION) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
             "regenerate the fine graph to record job output demands",
         ));
     }
