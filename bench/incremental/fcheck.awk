@@ -25,17 +25,18 @@ function entries(e, name, why,    n, x, i, y) {
 }
 function flush(   s) {
   if (job != "") {
-    if (!output_version || !volatile_format) {
-      print "regenerate the fine job trace for " job " to record job output demands" > "/dev/stderr"
+    if (!complete) {
+      print "regenerate the fine job trace for " job " to record job outputs and uncacheable forces" > "/dev/stderr"
       failed = 1
     } else for (s in inv) print job, s, inv[s]
   }
-  delete inv; delete pc; output_version = volatile_format = 0
+  delete inv; delete pc; complete = started = 0
 }
 $1 == "J" { flush(); job = $2; next }
-$0 == "V\tjob-output-v1" { output_version = 1; next }
+$0 == "B" && !started { started = 1; next }
+$0 == "V\tjob-trace-v2" && started && !complete { complete = 1; next }
+!started || complete || $0 == "B" || /^V/ { print "invalid fine job trace for " job > "/dev/stderr"; failed = 1; next }
 $1 == "R" && $2 == "?" { for (s in steps) inv[s] = "untracked " $3; next }
-$0 == "V\tvolatile-v1" { volatile_format = 1; next }
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
 $1 == "P" {
   if ($3 == "lit") pc[$2] = cl[$4 "\t" $5 "\t" $6]

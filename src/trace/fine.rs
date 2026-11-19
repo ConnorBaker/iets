@@ -23,11 +23,11 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, ErrorKind};
+use std::mem;
 use std::panic::Location;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
-use std::mem;
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
@@ -1529,8 +1529,8 @@ impl State {
     /// `obs` as lines: `R` regions, `P` the provenances the `K` lookups and
     /// `A` whole reads name, `X` the last position per file, then what the
     /// tracing cache records.
-    fn text(&self, ev: &Evaluator, obs: &[u32]) -> String {
-        let mut out = String::new();
+    fn text(&self, ev: &Evaluator, obs: &[u32], job: bool) -> String {
+        let mut out = String::from(if job { "B\n" } else { "" });
         let mut regions = Vec::new();
         let mut keys = Vec::new();
         let mut alls = Vec::new();
@@ -1589,7 +1589,11 @@ impl State {
             out.push_str(l);
             out.push('\n');
         }
-        out.push_str(VOLATILE_VERSION);
+        out.push_str(if job {
+            TRACE_VERSION
+        } else {
+            "V\tvolatile-v1\n"
+        });
         out
     }
 
@@ -1611,8 +1615,7 @@ impl State {
         }
         // Unreachable as an observation. An older writer also overwrites
         // this file when it records into a previously used directory.
-        o.push_str(OUTPUT_VERSION);
-        o.push_str(VOLATILE_VERSION);
+        o.push_str(TRACE_VERSION);
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
@@ -1722,7 +1725,7 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
     with(|s| {
         if let Some(p) = &s.out {
             let all = s.flatten(&s.log[s.frames[0].0..]);
-            if let Err(e) = std::fs::write(p, s.text(ev, &all)) {
+            if let Err(e) = std::fs::write(p, s.text(ev, &all, false)) {
                 errln!("fine trace: writing {}: {e}", p.display());
             }
         }
@@ -1735,9 +1738,7 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
                     s.flatten(&[EDGE | t])
                 };
                 let p = std::path::Path::new(&dir).join(i.to_string());
-                let mut text = s.text(ev, &obs);
-                text.push_str(OUTPUT_VERSION);
-                if let Err(e) = std::fs::write(&p, text) {
+                if let Err(e) = std::fs::write(&p, s.text(ev, &obs, true)) {
                     errln!("fine trace: writing {}: {e}", p.display());
                 }
             }
@@ -1911,7 +1912,7 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
-const VOLATILE_VERSION: &str = "V\tvolatile-v1\n";
+const TRACE_VERSION: &str = "V\tjob-trace-v2\n";
 
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
     Ok(std::fs::read(path)?
@@ -1922,21 +1923,19 @@ fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
         .collect())
 }
 
-const OUTPUT_VERSION: &str = "V\tjob-output-v1\n";
-
 fn read_observations(dir: &Path) -> io::Result<String> {
-    let mut obs = std::fs::read_to_string(dir.join("obs"))?;
-    if !obs.ends_with(VOLATILE_VERSION) {
-        return Err(io::Error::new(ErrorKind::InvalidData, "regenerate the fine graph to record uncacheable forces"));
-    }
-    if !obs.ends_with(OUTPUT_VERSION) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "regenerate the fine graph to record job output demands",
-        ));
-    }
-    obs.truncate(obs.len() - OUTPUT_VERSION.len());
-    Ok(obs)
+    let mut observations = fs::read_to_string(dir.join("obs"))?;
+    let rows = observations
+        .strip_suffix(TRACE_VERSION)
+        .filter(|rows| rows.is_empty() || rows.ends_with('\n'))
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "regenerate the fine graph to record job outputs and uncacheable forces",
+            )
+        })?;
+    observations.truncate(rows.len());
+    Ok(observations)
 }
 
 /// The steps each job of the trace graph in `dir` must be evaluated again
