@@ -84,6 +84,8 @@ guard that chose the list invalidates every existing position. A change
 read only while forcing one element invalidates that element. The last line
 of `roots`, `# list-control-v1`, marks graphs that recorded the list
 selection. Record older graphs again before using them with this checker.
+The text checker marks jobs without the corresponding `V` record dirty at
+every step.
 For JSON output each element's trace covers its serialization, including
 attributes selected through `outPath`, calls to `__toString`, and path
 copies. These dependencies can arise after forcing the element itself.

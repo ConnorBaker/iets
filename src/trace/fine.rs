@@ -1851,6 +1851,7 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
                 };
                 let p = std::path::Path::new(&dir).join(i.to_string());
                 let mut text = s.text(ev, &obs);
+                text.push_str("V\tlist-control-v1\n");
                 text.push_str(OUTPUT_VERSION);
                 if let Err(e) = std::fs::write(&p, text) {
                     errln!("fine trace: writing {}: {e}", p.display());
