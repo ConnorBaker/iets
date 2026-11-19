@@ -29,14 +29,17 @@ srv() {
   read -r r <&"${SRV[0]}"
   [ "$r" = ok ] || { echo "server: $1: $r" >&2; exit 1; }
 }
-while IFS=$'\t' read -r d s _; do srv "load $d $s"; done < $R/graphs
+while IFS=$'\t' read -r d s _; do
+  $I fine-check --require-stable-attr-order "$d" || exit 1
+  srv "load $d $s"
+done < $R/graphs
 
 # batch DIR JOBS QUERIES: evaluates the jobs and the fingerprints of the queries at $B into graph DIR
 batch() {
   local d=$1
   { head_of $B
     gawk -f qpaths.awk "$2"
-    gawk -F'\t' '{ s = ""; for (i = 2; i <= NF; i++) { x = $i; gsub(/\\/, "\\\\", x); gsub(/"/, "\\\"", x); gsub(/\$/, "\\$", x); s = s " \"" x "\"" } print "  (q [" s " ])" }' "$3"
+    LC_ALL=C gawk -F '\t' -v fmt=fields -f qpaths.awk "$3"
     echo "]"; } > $d.nix
   rm -rf $d
   IETS_FINE_TRACE= IETS_FINE_DAG=$d $I eval --strict --impure --no-ir-cache --no-tracing-cache --workers 1 \
@@ -61,6 +64,7 @@ round() {
   wait "${pids[@]}"
   for ((c = 0; c < k; c++)); do
     d=$R/dag-$step-$n-$c
+    $I fine-check --require-stable-attr-order "$d" || exit 1
     nj=$(wc -l < $R/j-$n-$c)
     head -n $nj $d.vals | paste $R/j-$n-$c - | gawk -F'\t' -v d=$d '{ print $1 "\t" d "\t" NR - 1 "\t" $2 }' >> $R/new-owners
     tail -n +$((nj + 1)) $d.vals | paste <(cut -f1 $R/q-$n-$c) - >> $R/fps

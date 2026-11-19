@@ -50,6 +50,12 @@ const QUERY: u32 = 1 << 30;
 /// The parent of a path of the root set.
 const NO_PATH: u32 = u32::MAX;
 const STALE: u32 = u32::MAX;
+/// A complete roots file whose job traces include the choice of result list.
+const ROOTS_FOOTER: &str = "# list-control-v1\n";
+// The second word was reserved. Old graphs cannot tell which jobs observed
+// symbol order, so require them to be recorded again.
+const TRACE_FORMAT: u32 = u32::from_le_bytes(*b"FTR1");
+const ATTR_ORDER_SEEN: u32 = 1 << 31;
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// An `import` is reading its source: the regions stand for the bytes.
@@ -80,6 +86,8 @@ struct State {
     rev: Option<FxHashMap<u64, Sym>>,
     obs: Vec<O>,
     obs_ids: FxHashMap<O, u32>,
+    /// What serializing each element of the last JSON result demanded.
+    json_elements: Vec<u32>,
     /// The frame that last recorded each observation and each trace.
     obs_stamp: Vec<u32>,
     /// Traces: a stamp, a length, then the entries; a trace id is the
@@ -89,6 +97,8 @@ struct State {
     log: Vec<u32>,
     /// Each open frame: where its entries start in `log`, and its stamp.
     frames: Vec<(usize, u32)>,
+    /// Evaluating the input and selecting the last result, before printing it.
+    selected: u32,
     /// The trace of each path copied to the store, for the cache hits.
     copies: FxHashMap<Vec<u8>, u32>,
     serial: u32,
@@ -141,6 +151,8 @@ mod kind {
     pub const PLAIN: u8 = 3;
     /// A set its parent holds as a value: no force of its own.
     pub const EAGER: u8 = 4;
+    /// A query whose value has no children with omitted metadata.
+    pub const SCALAR_QUERY: u8 = 5;
 }
 
 /// One observation.
@@ -149,6 +161,9 @@ enum O {
     Region(u32),
     Key(u32, Sym),
     All(u32),
+    /// A builtin inspected metadata absent from a set fingerprint.
+    Introspection,
+    AttrOrder,
     /// A position at a byte offset of a file reached a value.
     Pos(Arc<[u8]>, u32),
     /// What the tracing cache records, as a line of the output.
@@ -188,7 +203,7 @@ pub fn init() {
 fn start(out: Option<PathBuf>) {
     let mut s = State {
         out,
-        nodes: vec![0, 0],
+        nodes: vec![0, TRACE_FORMAT],
         serial: 1,
         ..State::default()
     };
@@ -239,8 +254,8 @@ impl State {
         self.frames.last().map_or(0, |f| f.1)
     }
 
-    fn record(&mut self, o: O) {
-        let id = match self.obs_ids.get(&o) {
+    fn obs_id(&mut self, o: O) -> u32 {
+        match self.obs_ids.get(&o) {
             Some(id) => *id,
             None => {
                 let id = self.obs.len() as u32;
@@ -249,7 +264,11 @@ impl State {
                 self.obs_stamp.push(0);
                 id
             }
-        };
+        }
+    }
+
+    fn record(&mut self, o: O) {
+        let id = self.obs_id(o);
         let st = self.stamp();
         if self.obs_stamp[id as usize] != st {
             self.obs_stamp[id as usize] = st;
@@ -278,6 +297,20 @@ pub fn push() -> bool {
         s.frames.push((s.log.len(), st));
     });
     true
+}
+
+/// Collect just the observations made by `f`. Pop also records the trace in
+/// its parent, so the whole-run trace still includes them.
+pub(crate) fn capture<T>(f: impl FnOnce() -> T) -> (T, u32) {
+    let tracing = push();
+    let value = f();
+    (value, if tracing { pop() } else { 0 })
+}
+
+pub(crate) fn selected(trace: u32) {
+    if on() {
+        with(|s| s.selected = trace);
+    }
 }
 
 impl State {
@@ -539,14 +572,17 @@ impl State {
                 _ => match fingerprint(names, v) {
                     Some(h) => {
                         self.fps[i] = Some(h);
-                        kind::QUERY
+                        match v.view() {
+                            Value::Attrs(_) | Value::List(_) => kind::QUERY,
+                            _ => kind::SCALAR_QUERY,
+                        }
                     }
                     None => kind::PLAIN,
                 },
             };
         }
         match self.kind[i] {
-            kind::QUERY => self.query(p, t),
+            kind::QUERY | kind::SCALAR_QUERY => self.query(p, t),
             k => {
                 if t != 0 {
                     self.edge(t);
@@ -678,6 +714,29 @@ pub fn apply(f: Word) {
                     }
                 }
             }
+        });
+    }
+}
+
+/// A multi-field equality walk may force a throwing field before discovering a
+/// mismatch. Even another import can change the order by interning a name
+/// first. File-local normalized region hashes cannot validate this read.
+#[cold]
+pub fn attr_order(x: &AttrsObj, y: &AttrsObj, fixed: usize) {
+    // Eager scalar cells have no computation to force during the walk. A
+    // change to code that produces those words is already a dependency of
+    // constructing the set. Split literal bindings remain region thunks.
+    let may_force = |a: &AttrsObj| {
+        a.iter_raw().any(|attr| {
+            let w = attr.cell.get();
+            attr.sym.0 as usize >= fixed
+                && (w.is_thunk() || matches!(w.view(), Value::Attrs(_) | Value::List(_)))
+        })
+    };
+    if may_force(x) || may_force(y) {
+        with(|s| {
+            s.nodes[1] |= ATTR_ORDER_SEEN;
+            s.record(O::AttrOrder);
         });
     }
 }
@@ -930,17 +989,23 @@ pub fn position(path: &[u8], off: u32) {
     with(|s| s.record(O::Pos(path.into(), off)));
 }
 
+pub fn introspection() {
+    if on() {
+        with(|s| s.record(O::Introspection));
+    }
+}
+
 /// What the tracing cache records.
 pub fn outside(o: &Obs) {
     let line = match o {
-        Obs::File { path, hash, .. } => format!("F\t{}\t{}", lossy(path), hex(hash)),
-        Obs::Dir { path, hash } => format!("D\t{}\t{}", lossy(path), hex(hash)),
-        Obs::Stat { path, kind, .. } => format!("S\t{}\t{}", lossy(path), kind_name(*kind)),
-        Obs::Tree { root, nar_hash, .. } => format!("T\t{}\t{}", lossy(root), hex(nar_hash)),
-        Obs::Canon { path, .. } => format!("C\t{}", lossy(path)),
-        Obs::Env { name, .. } => format!("E\t{}", lossy(name)),
-        Obs::Cmd { dir, .. } => format!("Q\t{}", lossy(dir)),
-        Obs::Input { entry, .. } => format!("I\t{}", lossy(entry)),
+        Obs::File { path, hash, .. } => format!("F\t{}\t{}", path_field(path), hex(hash)),
+        Obs::Dir { path, hash } => format!("D\t{}\t{}", path_field(path), hex(hash)),
+        Obs::Stat { path, kind, .. } => format!("S\t{}\t{}", path_field(path), kind_name(*kind)),
+        Obs::Tree { root, nar_hash, .. } => format!("T\t{}\t{}", path_field(root), hex(nar_hash)),
+        Obs::Canon { path, .. } => format!("C\t{}", path_field(path)),
+        Obs::Env { name, .. } => format!("E\t{}", path_field(name)),
+        Obs::Cmd { dir, .. } => format!("Q\t{}", path_field(dir)),
+        Obs::Input { entry, .. } => format!("I\t{}", path_field(entry)),
     };
     with(|s| s.record(O::Out(line)));
 }
@@ -1209,10 +1274,7 @@ impl Walk<'_> {
             let Ir::Region { id, body } = b.value else {
                 unreachable!("a split bind is a region");
             };
-            let sub = format!(
-                "{path}/{ord}.{}",
-                String::from_utf8_lossy(self.names.name(b.sym))
-            );
+            let sub = format!("{path}/{ord}.{}", name_field(self.names.name(b.sym)));
             self.in_bind_env(b, rec, from, |w| {
                 w.region(*id, sub, scope_tag(b.scope), body)
             });
@@ -1426,9 +1488,31 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-fn lossy(b: &[u8]) -> std::borrow::Cow<'_, str> {
-    String::from_utf8_lossy(b)
+/// Fields are byte strings. Common identifiers and paths stay readable; a
+/// leading '~' introduces hex, including the empty name (just '~'). A slash
+/// is structural only in region paths, so it must be escaped inside a name.
+fn field(bytes: &[u8], allow_slash: bool) -> std::borrow::Cow<'_, str> {
+    if !bytes.is_empty()
+        && bytes.iter().all(|&c| {
+            c.is_ascii_alphanumeric() || b"._+-".contains(&c) || (allow_slash && c == b'/')
+        })
+    {
+        std::borrow::Cow::Borrowed(std::str::from_utf8(bytes).expect("ASCII field"))
+    } else {
+        std::borrow::Cow::Owned(format!("~{}", hex(bytes)))
+    }
 }
+
+fn path_field(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    field(bytes, true)
+}
+
+fn name_field(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    field(bytes, false)
+}
+
+// Word zero is the unused stamp of the null trace on disk.
+const NAME_FORMAT: u32 = u32::from_le_bytes(*b"nam2");
 
 impl State {
     /// The observations of `entries` and of the traces they read, each once.
@@ -1460,7 +1544,7 @@ impl State {
 
     fn region_line(&self, id: u32) -> String {
         match self.regions.get(&id) {
-            Some(r) => format!("R\t{}\t{}\t{}", lossy(&r.file), r.path, hex(&r.hash)),
+            Some(r) => format!("R\t{}\t{}\t{}", path_field(&r.file), r.path, hex(&r.hash)),
             None => format!("R\t?\t{id}\t"),
         }
     }
@@ -1470,16 +1554,19 @@ impl State {
             Prov::Lit(l) => match self.lits.get(l) {
                 Some(l) => format!(
                     "P\t{i}\tlit\t{}\t{}\t{}",
-                    lossy(&l.file),
+                    path_field(&l.file),
                     l.region,
                     l.ordinal
                 ),
                 None => format!("P\t{i}\tlit?\t{l}"),
             },
-            Prov::Dir(d) => format!("P\t{i}\tdir\t{}", lossy(d)),
+            Prov::Dir(d) => format!("P\t{i}\tdir\t{}", path_field(d)),
             Prov::Union(a, b) => format!("P\t{i}\tu\t{a}\t{b}"),
             Prov::Remove(a, names) => {
-                let names: Vec<_> = names.iter().map(|n| ev.interner.name_str(*n)).collect();
+                let names: Vec<_> = names
+                    .iter()
+                    .map(|n| name_field(ev.interner.name(*n)))
+                    .collect();
                 format!("P\t{i}\tx\t{a}\t{}", names.join(" "))
             }
         }
@@ -1499,15 +1586,23 @@ impl State {
                 ev.describe_pos(crate::eval::Pos((f >> 32) as u32))
             );
         }
-        format!("A\t{p}\t{}:{}\t{nix}\t{st}", at.file(), at.line())
+        format!(
+            "A\t{p}\t{}:{}\t{}\t{}",
+            at.file(),
+            at.line(),
+            nix.escape_debug(),
+            st.escape_debug()
+        )
     }
 
     fn obs_line(&self, ev: &Evaluator, id: u32) -> String {
         match &self.obs[id as usize] {
             O::Region(r) => self.region_line(*r),
-            O::Key(p, k) => format!("K\t{p}\t{}", ev.interner.name_str(*k)),
+            O::Key(p, k) => format!("K\t{p}\t{}", name_field(ev.interner.name(*k))),
             O::All(p) => self.all_line(ev, *p),
-            O::Pos(f, off) => format!("X\t{}\t{off}", lossy(f)),
+            O::Introspection => "M".into(),
+            O::Pos(f, off) => format!("X\t{}\t{off}", path_field(f)),
+            O::AttrOrder => "AttrOrder".into(),
             O::Out(l) => l.clone(),
         }
     }
@@ -1516,7 +1611,7 @@ impl State {
     /// `A` whole reads name, `X` the last position per file, then what the
     /// tracing cache records.
     fn text(&self, ev: &Evaluator, obs: &[u32]) -> String {
-        let mut out = String::new();
+        let mut out = String::from("V\t2\nV\tattr-order-1\n");
         let mut regions = Vec::new();
         let mut keys = Vec::new();
         let mut alls = Vec::new();
@@ -1527,6 +1622,8 @@ impl State {
                 O::Region(r) => regions.push(*r),
                 O::Key(p, k) => keys.push((*p, *k)),
                 O::All(p) => alls.push(*p),
+                O::Introspection => out.push_str("M\n"),
+                O::AttrOrder => out.push_str("AttrOrder\n"),
                 O::Pos(f, off) => {
                     let o = pos.entry(f).or_insert(*off);
                     *o = (*o).max(*off);
@@ -1562,14 +1659,14 @@ impl State {
             }
         }
         for (p, k) in keys {
-            let _ = writeln!(out, "K\t{p}\t{}", ev.interner.name_str(k));
+            let _ = writeln!(out, "K\t{p}\t{}", name_field(ev.interner.name(k)));
         }
         for p in alls {
             out.push_str(&self.all_line(ev, p));
             out.push('\n');
         }
         for (f, off) in pos {
-            let _ = writeln!(out, "X\t{}\t{off}", lossy(f));
+            let _ = writeln!(out, "X\t{}\t{off}", path_field(f));
         }
         for l in outs {
             out.push_str(l);
@@ -1588,21 +1685,31 @@ impl State {
         roots: &[u32],
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
+        // Invalidate a previous capture before replacing any graph components.
+        let mut roots_file = std::fs::File::create(dir.join("roots"))?;
         let mut o = String::new();
         for id in 0..self.obs.len() as u32 {
-            // a name may hold a newline, and a line is an id
-            o.push_str(&self.obs_line(ev, id).replace('\n', "\\n"));
+            o.push_str(&self.obs_line(ev, id));
             o.push('\n');
         }
+        // Its presence also distinguishes graphs that recorded introspection
+        // from older ones. No trace references this extra row.
+        if !self.obs_ids.contains_key(&O::Introspection) {
+            o.push_str("M\n");
+        }
+        // Unreachable as an observation. An older writer also overwrites
+        // this file when it records into a previously used directory.
+        o.push_str(OUTPUT_VERSION);
         std::fs::write(dir.join("obs"), o)?;
         let mut p = String::new();
         for i in 0..self.provs.len() {
-            p.push_str(&self.prov_line(ev, i).replace('\n', "\\n"));
+            p.push_str(&self.prov_line(ev, i));
             p.push('\n');
         }
         std::fs::write(dir.join("provs"), p)?;
         let mut w = std::io::BufWriter::new(std::fs::File::create(dir.join("nodes"))?);
-        for x in &self.nodes {
+        std::io::Write::write_all(&mut w, &NAME_FORMAT.to_le_bytes())?;
+        for x in &self.nodes[1..] {
             std::io::Write::write_all(&mut w, &x.to_le_bytes())?;
         }
         std::io::Write::flush(&mut w)?;
@@ -1614,7 +1721,7 @@ impl State {
                 parent.to_string()
             };
             let fp = self.fps[i].map_or("-".to_string(), |h| hex(&h));
-            let name = ev.interner.name_str(*sym).replace(['\t', '\n'], " ");
+            let name = name_field(ev.interner.name(*sym));
             let (h, k, b) = (self.head[i], self.kind[i], self.born[i]);
             let _ = writeln!(
                 q,
@@ -1623,34 +1730,102 @@ impl State {
             );
         }
         std::fs::write(dir.join("queries"), q)?;
-        let r: String = roots.iter().map(|t| format!("{t}\n")).collect();
-        std::fs::write(dir.join("roots"), r)
+        let mut r: String = roots.iter().map(|t| format!("{t}\n")).collect();
+        r.push_str(ROOTS_FOOTER);
+        std::io::Write::write_all(&mut roots_file, r.as_bytes())
     }
 }
 
-/// The trace of each element of `v` when it is a list, 0 for none.
-fn roots(v: Word) -> Vec<u32> {
+/// Both traces must remain valid. Keep a single shared edge to the work
+/// of choosing the list instead of copying its observations into every job.
+fn join(nodes: &mut Vec<u32>, a: u32, b: u32) -> u32 {
+    if a == 0 || a == b {
+        return b;
+    }
+    if b == 0 {
+        return a;
+    }
+    let t = nodes.len() as u32;
+    nodes.extend([0, 2, EDGE | a, EDGE | b]);
+    t
+}
+
+pub fn begin_json_output() {
+    with(|s| s.json_elements.clear());
+}
+
+/// JSON can force descendants, copy a path, or run a set's custom coercion
+/// after the element's own thunk has returned.
+pub fn json_element(
+    w: Word,
+    render: impl FnOnce() -> crate::eval::EvalResult<()>,
+) -> crate::eval::EvalResult<()> {
+    push();
+    let result = render();
+    if result.is_ok() {
+        // Keep the direct dependency on the element's force even when its
+        // use inside the renderer went through a fingerprinted query.
+        if w.is_thunk() {
+            let st = w.thunk_state_cell().get();
+            if st.is_traced() {
+                edge(st.traced_id());
+            }
+        }
+        let t = pop();
+        with(|s| s.json_elements.push(t));
+    } else {
+        pop_failed();
+    }
+    result
+}
+
+/// The trace of each element of `v` when it is a list.
+fn roots(s: &mut State, v: Word) -> Vec<u32> {
+    let mut parent = s.selected;
     let mut v = v;
     if v.is_thunk() {
         let st = v.thunk_state_cell().get();
         if v.thunk_unforced(st) || st.is_blackhole() {
             return Vec::new();
         }
+        if st.is_traced() {
+            parent = join(&mut s.nodes, parent, st.traced_id());
+        }
         v = v.thunk_value(st);
     }
     let Some(l) = v.as_list() else {
         return Vec::new();
     };
+    if s.json_elements.len() == l.len as usize {
+        return std::mem::take(&mut s.json_elements)
+            .into_iter()
+            .map(|t| join(&mut s.nodes, parent, t))
+            .collect();
+    }
+    let mut fallback = None;
     l.cells()
         .iter()
         .map(|c| {
             let w = c.get();
+            // Text rendering can visit children after the element's force
+            // and can print a reference to an object seen in another job.
+            // Only scalar terminal values have a complete WHNF trace here.
+            if forced(w).is_none_or(|v| matches!(v.view(), Value::Attrs(_) | Value::List(_))) {
+                let t = *fallback.get_or_insert_with(|| {
+                    let id = s.obs_id(O::Out("R\t?\tjob-output\t".into()));
+                    let t = s.nodes.len() as u32;
+                    s.nodes.extend([0, 1, id]);
+                    t
+                });
+                return join(&mut s.nodes, parent, t);
+            }
             let st = if w.is_thunk() {
                 w.thunk_state_cell().get()
             } else {
                 Word::EMPTY
             };
-            if st.is_traced() { st.traced_id() } else { 0 }
+            let cell = if st.is_traced() { st.traced_id() } else { 0 };
+            join(&mut s.nodes, parent, cell)
         })
         .collect()
 }
@@ -1666,7 +1841,7 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) {
                 errln!("fine trace: writing {}: {e}", p.display());
             }
         }
-        let roots = v.map(roots).unwrap_or_default();
+        let roots = v.map(|v| roots(s, v)).unwrap_or_default();
         if let Some(dir) = std::env::var_os("IETS_FINE_JOBS") {
             for (i, t) in roots.iter().enumerate() {
                 let obs = if *t == 0 {
@@ -1711,19 +1886,24 @@ fn kind_name(k: Kind) -> &'static str {
 pub fn regions_main(argv: &[String]) -> i32 {
     start(None);
     let mut ev = Evaluator::new();
+    println!("V\t2");
     for arg in argv {
         let (f, at) = arg.split_once('=').unwrap_or((arg, arg));
-        let path = crate::compile::canon_path(at.as_bytes());
-        let src = match std::fs::read(f) {
+        let at_bytes = crate::argv::bytes(at);
+        let path = crate::compile::canon_path(&at_bytes);
+        let at = path_field(&at_bytes);
+        let src = match std::fs::read(crate::argv::os(f)) {
             Ok(s) => s,
             Err(e) => {
                 errln!("{f}: {e}");
+                println!("E\t{at}");
                 continue;
             }
         };
         let dir = crate::eval::dir_of(&path).to_vec();
         if let Err(e) = ev.compile_file(&path, src, &dir) {
-            println!("E\t{at}\t{}", e.msg);
+            errln!("{f}: {}", e.msg);
+            println!("E\t{at}");
             continue;
         }
         with(|s| {
@@ -1735,7 +1915,11 @@ pub fn regions_main(argv: &[String]) -> i32 {
             let mut ls: Vec<_> = s.lits.values().filter(|l| *l.file == *path).collect();
             ls.sort_by(|a, b| (&a.region, a.ordinal).cmp(&(&b.region, b.ordinal)));
             for l in ls {
-                let mut keys: Vec<_> = l.keys.iter().map(|k| ev.interner.name_str(*k)).collect();
+                let mut keys: Vec<_> = l
+                    .keys
+                    .iter()
+                    .map(|k| name_field(ev.interner.name(*k)))
+                    .collect();
                 keys.sort();
                 println!("L\t{at}\t{}\t{}\t{}", l.region, l.ordinal, keys.join(" "));
             }
@@ -1772,9 +1956,11 @@ fn bit(s: u8) -> u128 {
 
 impl Changes {
     /// `step\tCHANGE...` lines, as `fchg.sh` writes them.
-    fn read(text: &str) -> Changes {
+    fn read(file: &str) -> std::io::Result<Changes> {
+        let text = std::fs::read_to_string(file)?;
         let mut c = Changes::default();
         let mut idx: FxHashMap<String, u8> = FxHashMap::default();
+        let mut versioned = FxHashSet::default();
         for line in text.lines() {
             let f: Vec<&str> = line.split('\t').collect();
             if f.len() < 3 {
@@ -1801,6 +1987,15 @@ impl Changes {
                 *m.entry(k.to_string()).or_insert(0) |= bit(s)
             };
             match (f[1], f.len()) {
+                ("V", 3) if f[2] == "2" => {
+                    versioned.insert(s);
+                }
+                ("V", _) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unsupported name format; regenerate the changes",
+                    ));
+                }
                 ("CR", 4..) => *c.regions.entry(f[2..4].join("\t")).or_insert(0) |= bit(s),
                 ("CF", _) => or(&mut c.files, f[2]),
                 ("CL", 6..) => c
@@ -1824,7 +2019,13 @@ impl Changes {
                 _ => {}
             }
         }
-        c
+        if idx.len() != versioned.len() || versioned.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "missing name format; regenerate the changes",
+            ));
+        }
+        Ok(c)
     }
 }
 
@@ -1849,13 +2050,79 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
+fn header(bytes: &[u8]) -> std::io::Result<u32> {
+    if !bytes.starts_with(&NAME_FORMAT.to_le_bytes()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "incompatible fine trace name format; regenerate the trace",
+        ));
+    }
+    if let Some(word) = bytes.get(4..8) {
+        let flags = u32::from_le_bytes(word.try_into().unwrap());
+        if flags & !ATTR_ORDER_SEEN == TRACE_FORMAT {
+            return Ok(flags);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "incompatible fine trace, record the graph again",
+    ))
+}
+
+fn require_stable_attr_order(dir: &str) -> std::io::Result<()> {
+    use std::io::Read;
+    let mut bytes = [0; 8];
+    std::fs::File::open(std::path::Path::new(dir).join("nodes"))?.read_exact(&mut bytes)?;
+    if header(&bytes)? & ATTR_ORDER_SEEN != 0 {
+        return Err(std::io::Error::other(
+            "attribute comparison can depend on earlier jobs, evaluate the original batch in order",
+        ));
+    }
+    Ok(())
+}
+
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
-    Ok(std::fs::read(path)?
+    let bytes = std::fs::read(path)?;
+    header(&bytes)?;
+    let mut words: Vec<_> = bytes
         .as_chunks::<4>()
         .0
         .iter()
         .map(|b| u32::from_le_bytes(*b))
-        .collect())
+        .collect();
+    words[0] = 0;
+    Ok(words)
+}
+
+fn read_roots(dir: &std::path::Path) -> std::io::Result<Vec<u32>> {
+    use std::io::{Error, ErrorKind};
+    let text = std::fs::read_to_string(dir.join("roots"))?;
+    let ids = text.strip_suffix(ROOTS_FOOTER).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "missing list-control traces; record the graph again",
+        )
+    })?;
+    ids.lines()
+        .map(|line| {
+            line.parse()
+                .map_err(|e| Error::new(ErrorKind::InvalidData, e))
+        })
+        .collect()
+}
+
+const OUTPUT_VERSION: &str = "V\tjob-output-v1\n";
+
+fn read_observations(dir: &std::path::Path) -> std::io::Result<String> {
+    let mut obs = std::fs::read_to_string(dir.join("obs"))?;
+    if !obs.ends_with(OUTPUT_VERSION) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "regenerate the fine graph to record job output demands",
+        ));
+    }
+    obs.truncate(obs.len() - OUTPUT_VERSION.len());
+    Ok(obs)
 }
 
 /// The steps each job of the trace graph in `dir` must be evaluated again
@@ -1870,8 +2137,9 @@ fn check_dag(
     } else {
         u128::MAX >> (128 - c.steps.len())
     };
+    let roots = read_roots(dir)?;
     let leaves = leaves(c, &std::fs::read_to_string(dir.join("provs"))?);
-    let obs = ObsIndex::new(&std::fs::read_to_string(dir.join("obs"))?, skip).changed(c, &leaves);
+    let obs = ObsIndex::new(&read_observations(dir)?, skip).changed(c, &leaves);
     let mut words = read_words(&dir.join("nodes"))?;
     // a trace comes after the traces it reads, so one pass in order does;
     // the stamp word of each trace, of no use here, takes the index of its
@@ -1899,11 +2167,8 @@ fn check_dag(
         at += 2 + n;
     }
     let mut out = Vec::new();
-    for (i, line) in std::fs::read_to_string(dir.join("roots"))?
-        .lines()
-        .enumerate()
-    {
-        let t: usize = line.parse().unwrap_or(0);
+    for (i, root) in roots.into_iter().enumerate() {
+        let t = root as usize;
         let m = match t {
             0 => 0,
             t if t >= words.len() => every,
@@ -1988,6 +2253,8 @@ struct Graph {
     index: ObsIndex,
     words: Vec<u32>,
     roots: Vec<u32>,
+    /// Jobs that read metadata omitted by a query fingerprint.
+    introspects: Vec<bool>,
     paths: Vec<GPath>,
     /// By key, its path, or `NO_PATH`.
     by_key: Vec<u32>,
@@ -2022,6 +2289,7 @@ struct Graph {
 #[derive(Default)]
 struct ObsIndex {
     n: usize,
+    introspection: Option<u32>,
     every: Vec<u32>,
     regions: FxHashMap<String, Vec<u32>>,
     region_files: FxHashMap<String, Vec<u32>>,
@@ -2054,6 +2322,8 @@ impl ObsIndex {
                 f.next().unwrap_or(""),
             );
             match kind {
+                "M" => x.introspection = Some(i),
+                "AttrOrder" => x.every.push(i),
                 "R" if a == "?" => x.every.push(i),
                 "R" => {
                     // the file and the region path are next to each other in the line
@@ -2257,12 +2527,9 @@ impl Graph {
         }
         let (provs, index, words, roots) = (
             std::fs::read_to_string(d.join("provs"))?,
-            ObsIndex::new(&std::fs::read_to_string(d.join("obs"))?, None),
+            ObsIndex::new(&read_observations(d)?, None),
             read_words(&d.join("nodes"))?,
-            std::fs::read_to_string(d.join("roots"))?
-                .lines()
-                .map(|l| l.parse().unwrap_or(0))
-                .collect(),
+            read_roots(d)?,
         );
         let mut g = Graph {
             dir,
@@ -2271,6 +2538,7 @@ impl Graph {
             index,
             words,
             roots,
+            introspects: Vec::new(),
             by_key,
             paths,
             rings,
@@ -2311,6 +2579,9 @@ impl Graph {
         let mut edges = Pairs(vec![0; parts], Vec::new());
         let mut read = Pairs(vec![0; self.paths.len()], Vec::new());
         let mut heads = Pairs(vec![0; self.paths.len()], Vec::new());
+        // A trace follows its inputs. Propagate the marker during the index
+        // walk, including through shared thunks and copied sets.
+        let mut metadata = vec![0u64; words.len().div_ceil(64)];
         let mut at = 2;
         while at < words.len() {
             let b = (at >> BLOCK) as u32;
@@ -2320,11 +2591,13 @@ impl Graph {
             words[at] = 0;
             let n = words[at + 1] as usize;
             let mut k = at + 2;
+            let mut inspects = false;
             while k < at + 2 + n {
                 let w = words[k];
                 k += 1;
                 if w & EDGE == 0 {
                     obs.add(w, b);
+                    inspects |= self.index.introspection == Some(w);
                     continue;
                 }
                 if w & QUERY != 0 {
@@ -2341,12 +2614,24 @@ impl Graph {
                     }
                 }
                 let t = w & !(EDGE | QUERY);
+                inspects |= metadata[t as usize / 64] & (1 << (t % 64)) != 0;
                 if t != 0 && t >> BLOCK != b {
                     edges.add(t >> PART, b);
                 }
             }
+            if inspects {
+                metadata[at / 64] |= 1 << (at % 64);
+            }
             at += 2 + n;
         }
+        self.introspects = self
+            .roots
+            .iter()
+            .map(|&t| {
+                self.index.introspection.is_none()
+                    || metadata[t as usize / 64] & (1 << (t % 64)) != 0
+            })
+            .collect();
         read.1.clear();
         self.by_obs = Lists::new(self.index.n, &obs.1);
         self.readers = Lists::new(parts, &edges.1);
@@ -2361,11 +2646,24 @@ impl Graph {
             .filter(|p| *p != NO_PATH)
     }
 
-    fn status(&self, t: u32) -> Option<(bool, u32)> {
-        match self.words[t as usize] {
-            0 => None,
-            k => Some(self.stat[k as usize - 1]),
+    fn job_status(&self, t: u32, introspects: bool) -> Option<St> {
+        let i = self.words[t as usize].checked_sub(1)?;
+        let st = self.stat[i as usize];
+        // An equal shallow fingerprint cannot prove that a selected function's
+        // formals or a binding's source position stayed equal. A scalar
+        // fingerprint from this revision still covers the entire value.
+        if introspects && !st.0 {
+            for &key in self.sets.get(st.1) {
+                let scalar = self.path_of(key).is_some_and(|p| {
+                    self.paths[p as usize].kind == kind::SCALAR_QUERY
+                        && self.mine[p as usize] & LOCAL != 0
+                });
+                if !scalar {
+                    return Some(HARD);
+                }
+            }
         }
+        Some(st)
     }
 
     fn ring(&self, h: u32) -> impl Iterator<Item = u32> + '_ {
@@ -2636,7 +2934,8 @@ impl Server {
             .map(|g| {
                 g.roots
                     .iter()
-                    .map(|t| if *t == 0 { None } else { g.status(*t) })
+                    .zip(&g.introspects)
+                    .map(|(&t, &introspects)| g.job_status(t, introspects))
                     .collect()
             })
             .collect()
@@ -2866,9 +3165,8 @@ fn serve() -> i32 {
                 }
                 Err(e) => format!("error {file}: {e}\n"),
             },
-            ["check", file, dest] => match std::fs::read_to_string(file) {
-                Ok(t) => {
-                    let c = Changes::read(&t);
+            ["check", file, dest] => match Changes::read(file) {
+                Ok(c) => {
                     let res = s.check(&c);
                     let mut o = String::new();
                     let mut suspects: FxHashSet<u32> = FxHashSet::default();
@@ -2928,6 +3226,17 @@ fn serve() -> i32 {
 /// `--serve` keeps graphs for many checks (`serve`), `--job N DAG` prints
 /// what job N of a graph observed.
 pub fn check_main(argv: &[String]) -> i32 {
+    if let [flag, dirs @ ..] = argv
+        && flag == "--require-stable-attr-order"
+    {
+        for dir in dirs {
+            if let Err(e) = require_stable_attr_order(dir) {
+                errln!("{dir}: {e}");
+                return 1;
+            }
+        }
+        return 0;
+    }
     if let [flag] = argv
         && flag == "--serve"
     {
@@ -2948,8 +3257,8 @@ pub fn check_main(argv: &[String]) -> i32 {
         errln!("usage: iets fine-check CHANGES [--skip TEXT] DAG...");
         return 2;
     };
-    let c = match std::fs::read_to_string(changes) {
-        Ok(t) => Changes::read(&t),
+    let c = match Changes::read(changes) {
+        Ok(c) => c,
         Err(e) => {
             errln!("{changes}: {e}");
             return 1;
@@ -2994,17 +3303,10 @@ pub fn check_main(argv: &[String]) -> i32 {
 
 /// `iets fine-check --job N DAG`: the observations of job N of a graph.
 fn show_job(dir: &std::path::Path, job: usize) -> std::io::Result<()> {
-    let obs: Vec<String> = std::fs::read_to_string(dir.join("obs"))?
-        .lines()
-        .map(String::from)
-        .collect();
+    let obs: Vec<String> = read_observations(dir)?.lines().map(String::from).collect();
     let words = read_words(&dir.join("nodes"))?;
-    let roots = std::fs::read_to_string(dir.join("roots"))?;
-    let t: u32 = roots
-        .lines()
-        .nth(job)
-        .and_then(|l| l.parse().ok())
-        .unwrap_or(0);
+    let roots = read_roots(dir)?;
+    let t = roots.get(job).copied().unwrap_or(0);
     let mut seen = FxHashSet::default();
     let mut ids = FxHashSet::default();
     let mut stack = vec![t];

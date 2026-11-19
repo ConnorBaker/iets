@@ -28,6 +28,7 @@ and one merge in ten invalidated all of them.
 | a region: a file's root, or one binding of a set or `let` of 8 bindings or more | the evaluation enters it | its syntax changes; positions and comments do not count |
 | a name looked up in such a set, or in a `readDir` listing | `get`, `?`, `with`, a formal argument | the name comes or goes in a set or listing the lookup went through |
 | a whole read of such a set or listing | `attrNames`, `==`, iteration | any name of it comes or goes |
+| attribute comparison order | equality reaches multiple source-interned fields that could force more computation | any recorded change, since an earlier import or dynamic name can change which field is forced first |
 | a position that reached a value | `unsafeGetAttrPos`, `__curPos` | a byte before it changes |
 | a file, a copied tree, a path's kind | as in the tracing cache | as in the tracing cache |
 
@@ -64,14 +65,52 @@ of a file as if it were at `AS`. A change between two revisions is then a list
 of changed regions, names that came or went per set and per directory, the
 files that changed, and the first changed byte of each file.
 
+Each name occupies one text field. ASCII letters, digits, dots, underscores,
+plus signs and hyphens are written literally. File fields also permit slashes.
+Every other byte string, including the empty name, is written as `~` followed
+by its hexadecimal bytes. This keeps a quoted name containing a slash distinct
+from a nested binding path and a literal `"*"` distinct from a wildcard change.
+Region tables, flat traces and per-step changes carry a `V\t2` record. The DAG
+carries the version in the first word of `nodes`. Regenerate older artifacts
+before comparing revisions or replaying queries.
+
 `IETS_FINE_DAG=DIR` writes the traces of a run as one graph, with the trace
 of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the
 traces were made, since a trace comes after the traces it reads.
 
+Each job also observes the work that selected the result list. Changing a
+guard that chose the list invalidates every existing position. A change
+read only while forcing one element invalidates that element. The last line
+of `roots`, `# list-control-v1`, marks graphs that recorded the list
+selection. Record older graphs again before using them with this checker.
+For JSON output each element's trace covers its serialization, including
+attributes selected through `outPath`, calls to `__toString`, and path
+copies. These dependencies can arise after forcing the element itself.
+The text printer can display a reference to a previously printed container.
+For text output, a list or set element, or an element still unforced, is
+therefore checked again on each change. Scalar jobs continue to use their
+own traces. Regenerate graphs recorded before output demands were tracked.
+Graphs written before the checker recorded comparison order must be regenerated.
+For example, comparing a set containing a mismatching field and a throwing
+field can either return false or throw. Both Nix and iets compare fields in
+symbol interning order. Reordering an unrelated earlier import can therefore
+change `tryEval` of the comparison with identical source for both operands.
+The checker conservatively invalidates readers of such walks on every step.
+It can reuse comparisons that stop among the fixed Nix startup symbols, as
+well as comparisons of eager scalar fields. The derivation `outPath` shortcut
+and length checks also keep their usual dependencies.
+
+A subset evaluation can change interning order even on the same revision by
+omitting an earlier job. Before accepting subset replay, the two replay
+drivers check both the original graphs and the newly recorded batches with
+`fine-check --require-stable-attr-order DAG...`. This reads their eight-byte
+node headers and reports when evaluation requires the original batch in its
+original order. Other uses of `fine-check` still report changed job indices.
+
 ## Results
 
-All measurements are on bld1 (32 cores, 125 GB), at one worker per process,
+These measurements predate the comparison-order guard. They were made on bld1 (32 cores, 125 GB), at one worker per process,
 without the IR cache.
 
 ### How many jobs a merge invalidates
