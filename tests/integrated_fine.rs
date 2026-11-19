@@ -104,3 +104,42 @@ fn chooser_alias_membership_and_nested_render_demands() {
         fs::write(file, before).unwrap();
     }
 }
+
+#[test]
+fn volatile_selection_and_nested_json_reach_their_consumers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root.nix");
+    let graph = tmp.path().join("graph");
+    let changes = tmp.path().join("changes");
+    let bin = bin();
+    fs::write(&changes, "r\tV\t2\n").unwrap();
+    for (expr, expected) in [
+        (
+            "if builtins.currentTime > 0 then [ 1 2 ] else [ 3 4 ]",
+            &[0, 1][..],
+        ),
+        ("[ { time=builtins.currentTime; } 7 ]", &[0][..]),
+    ] {
+        fs::write(&root, expr).unwrap();
+        ok(bin
+            .cmd()
+            .args([
+                "eval",
+                "--impure",
+                "--strict",
+                "--json",
+                "--no-cache",
+                "--workers",
+                "1",
+            ])
+            .arg(&root)
+            .env("IETS_FINE_TRACE", "")
+            .env("IETS_FINE_DAG", &graph));
+        let report = stdout(&ok(bin.cmd().arg("fine-check").arg(&changes).arg(&graph)));
+        let flagged: BTreeSet<usize> = report
+            .lines()
+            .map(|line| line.split('\t').nth(1).unwrap().parse().unwrap())
+            .collect();
+        assert_eq!(flagged, expected.iter().copied().collect(), "{expr}");
+    }
+}
