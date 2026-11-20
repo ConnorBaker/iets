@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::{ptr, thread};
 
 use crate::eval::Evaluator;
-use crate::trace::fine;
 use crate::runtime::Arena;
 use crate::session::Session;
+use crate::trace::fine;
 
 pub use force::{
     defer, fanout_attrs_coerce, fanout_list, fanout_list_coerce, force_deep, force_thunk,
