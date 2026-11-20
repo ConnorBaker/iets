@@ -1089,14 +1089,17 @@ impl Evaluator {
         let (ir, cacheable, diags) = result?;
         let t1 = Instant::now();
         let allows = self.files[file.0 as usize].allows();
-        if cacheable
-            && let Some(bytes) = cache::serialize_file(self, ir, base, &diags, allows, *symbols)
-        {
-            cache.write(&key, &bytes);
-        }
+        let stored = cacheable
+            && cache::serialize_file(self, ir, base, &diags, allows, *symbols)
+                .is_some_and(|bytes| cache.store(&key, &bytes));
         if cache.stats {
+            let (action, phase) = if stored {
+                ("store", "write")
+            } else {
+                ("compile", "cache")
+            };
             errln!(
-                "ir-cache store {} {}us (write {}us)",
+                "ir-cache {action} {} {}us ({phase} {}us)",
                 String::from_utf8_lossy(path),
                 (t1 - t0).as_micros(),
                 t1.elapsed().as_micros()
