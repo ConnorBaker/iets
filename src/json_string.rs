@@ -3,7 +3,7 @@
 pub(crate) enum StringError {
     End,
     Backslash,
-    Hex { start: usize },
+    Hex,
     HighSurrogate,
     LowSurrogate,
     Control,
@@ -15,7 +15,7 @@ impl StringError {
         match self {
             Self::End => "missing closing quote",
             Self::Backslash => "forbidden character after backslash",
-            Self::Hex { .. } => "'\\u' must be followed by 4 hex digits",
+            Self::Hex => "'\\u' must be followed by 4 hex digits",
             Self::HighSurrogate if store => {
                 "surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFF"
             }
@@ -29,13 +29,12 @@ impl StringError {
 }
 
 fn hex4(input: &[u8], cursor: &mut usize) -> Result<u32, StringError> {
-    let start = *cursor;
     let mut value = 0;
     for _ in 0..4 {
         let digit = input
             .get(*cursor)
             .and_then(|&c| char::from(c).to_digit(16))
-            .ok_or(StringError::Hex { start })?;
+            .ok_or(StringError::Hex)?;
         value = value * 16 + digit;
         *cursor += 1;
     }
