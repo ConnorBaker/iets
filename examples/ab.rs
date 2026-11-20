@@ -1385,7 +1385,7 @@ mod ab {
                 for name in ["before", "after", "missing"] {
                     let bin = root.path().join(name);
                     if name != "missing" {
-                        std::os::unix::fs::symlink(&false_bin, &bin).unwrap();
+                        symlink(&false_bin, &bin).unwrap();
                     }
                     let result = run_once(
                         &bin,
@@ -1991,8 +1991,6 @@ mod ab {
         #[test]
         #[cfg(target_os = "linux")]
         fn preflight_rejects_known_mismatches_without_requiring_discovery() {
-            use std::os::unix::fs::{PermissionsExt, symlink};
-
             let procfs = tempfile::tempdir().unwrap();
             let root = procfs.path();
             let own = process::id().to_string();
