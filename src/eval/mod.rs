@@ -1334,6 +1334,9 @@ impl Evaluator {
         if !w.thunk_unforced(st) {
             return Ok(w.thunk_value(st));
         }
+        if let Some(index) = st.failed_index() {
+            return Err(self.session.failed_thunks.rethrow(index));
+        }
         state.set(Word::BLACKHOLE);
         #[cfg(feature = "stats2")]
         {
@@ -1353,10 +1356,19 @@ impl Evaluator {
                 state.set(done);
                 Ok(v)
             }
-            Err(e) => {
-                state.set(st);
+            Err(mut e) => {
+                state.set(self.failed_thunk_state(st, &mut e));
                 Err(e)
             }
+        }
+    }
+
+    #[cold]
+    pub(crate) fn failed_thunk_state(&self, payload: Word, err: &mut Error) -> Word {
+        if err.is_catchable() {
+            Word::failed(self.session.failed_thunks.record(err))
+        } else {
+            payload
         }
     }
 
