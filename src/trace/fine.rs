@@ -20,6 +20,7 @@
 //! jobs that share thunks still gives each job all that it depends on.
 
 use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, ErrorKind};
@@ -37,6 +38,7 @@ use crate::runtime::Word;
 use crate::runtime::value::{Attr, AttrsObj, Value};
 use crate::runtime::word::{TAG_IMM, TAG_INT};
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
+use crate::sys::{OsStrExt, path_from_internal, path_to_internal};
 use crate::trace::{Kind, Obs};
 
 pub const FINE_MIN: usize = 8;
@@ -946,6 +948,15 @@ pub fn volatile() {
 
 /// What the tracing cache records.
 pub fn outside(o: &Obs) {
+    match o {
+        Obs::File { path, .. } | Obs::Dir { path, .. } | Obs::Canon { path, .. } => {
+            path_resolution(&path_from_internal(path), true);
+        }
+        Obs::Stat { path, follow, .. } => path_resolution(&path_from_internal(path), *follow),
+        // NAR serialization records a final symlink itself.
+        Obs::Tree { root, .. } => path_resolution(Path::new(OsStr::from_bytes(root)), false),
+        _ => {}
+    }
     let line = match o {
         Obs::File { path, hash, .. } => format!("F\t{}\t{}", lossy(path), hex(hash)),
         Obs::Dir { path, hash } => format!("D\t{}\t{}", lossy(path), hex(hash)),
@@ -965,6 +976,49 @@ pub(crate) fn tree_mtime() {
     if on() {
         with(|s| s.record(O::Out("TreeMtime".into())));
     }
+}
+
+/// Git reports changes under their repository paths. If an input was read
+/// through a symlink, changing its target or an intermediate link can leave
+/// the observed spelling untouched. Mark only the force that read the path.
+fn path_resolution(path: &Path, follow_leaf: bool) {
+    let uncertain = !path.is_absolute()
+        || path.to_str().is_none_or(|p| p.contains(['\t', '\n', '\r']))
+        || path.ancestors().skip(usize::from(!follow_leaf)).any(|p| {
+            match fs::symlink_metadata(p) {
+                Ok(m) => m.is_symlink(),
+                Err(e) => !matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ),
+            }
+        });
+    if uncertain {
+        followed_link();
+    } else if let Some(parent) = path.parent() {
+        // A directory which is ordinary now can itself be replaced by a
+        // link. CM(directory) covers the replacement, including a formerly
+        // missing child which suddenly exists through the new link.
+        with(|s| s.record(O::Out(format!("C\t{}", lossy(&path_to_internal(parent))))));
+    }
+}
+
+pub(crate) fn followed_link() {
+    with(|s| s.record(O::Out("R\t?\tvolatile\t".into())));
+}
+
+pub(crate) fn import_file(path: &[u8]) {
+    path_resolution(&path_from_internal(path), true);
+    // Keep the region as the identity for byte edits. Replacing its file
+    // by a link changes the source identity even if the region hash matches.
+    with(|s| s.record(O::Out(format!("S\t{}\tregular", lossy(path)))));
+}
+
+pub(crate) fn disk_listing(path: &[u8]) {
+    path_resolution(&path_from_internal(path), true);
+    // A directory replaced by a link can make a previously absent key appear
+    // without a Git addition under the spelling readDir was given.
+    with(|s| s.record(O::Out(format!("C\t{}", lossy(path)))));
 }
 
 /// After the compile of `path` with `root` as its IR: the regions and the
@@ -1600,7 +1654,7 @@ impl State {
         out.push_str(if job {
             TRACE_VERSION
         } else {
-            "V\tvolatile-v1\n"
+            "V\trun-trace-v1\n"
         });
         out
     }
@@ -1920,7 +1974,7 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
-const TRACE_VERSION: &str = "V\tjob-trace-v3\n";
+const TRACE_VERSION: &str = "V\tjob-trace-v4\n";
 
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
     Ok(std::fs::read(path)?
@@ -2163,7 +2217,12 @@ impl ObsIndex {
                 // Revision deltas carry no environment, SCM command results,
                 // input-store presence, or checkout timestamps.
                 "E" | "Q" | "I" | "TreeMtime" => x.every.push(i),
-                "F" | "C" => push(&mut x.files, a, i),
+                "F" => push(&mut x.files, a, i),
+                "C" => {
+                    for prefix in Path::new(a).ancestors() {
+                        push(&mut x.files, prefix.to_str().unwrap(), i);
+                    }
+                }
                 "T" => push(&mut x.trees, a, i),
                 "S" => push(&mut x.stats, a, i),
                 "D" => push(&mut x.dirs, a, i),

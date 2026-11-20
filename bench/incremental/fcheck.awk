@@ -26,7 +26,7 @@ function entries(e, name, why,    n, x, i, y) {
 function flush(   s) {
   if (job != "") {
     if (!complete) {
-      print "regenerate the fine job trace for " job " to record job outputs and uncacheable forces" > "/dev/stderr"
+      print "regenerate the fine job trace for " job " with the current trace format" > "/dev/stderr"
       failed = 1
     } else for (s in inv) print job, s, inv[s]
   }
@@ -34,7 +34,7 @@ function flush(   s) {
 }
 $1 == "J" { flush(); job = $2; next }
 $0 == "B" && !started { started = 1; next }
-$0 == "V\tjob-trace-v3" && started && !complete { complete = 1; next }
+$0 == "V\tjob-trace-v4" && started && !complete { complete = 1; next }
 !started || complete || $0 == "B" || /^V/ { print "invalid fine job trace for " job > "/dev/stderr"; failed = 1; next }
 $1 == "R" && $2 == "?" { for (s in steps) inv[s] = "untracked " $3; next }
 $1 == "E" || $1 == "Q" || $1 == "I" || $1 == "TreeMtime" { for (s in steps) inv[s] = "external read " $1; next }
@@ -50,7 +50,15 @@ $1 == "P" {
 $1 == "K" { if (pc[$2] != "" && ($3 in cn || index(pc[$2], ":*"))) entries(pc[$2], $3, "K " $3); next }
 $1 == "A" { if (pc[$2] != "" && !(skip != "" && ($4 " " $5) ~ skip)) entries(pc[$2], "", "A " $3 " " $4); next }
 $1 == "X" { if ($2 in cx) { n = split(cx[$2], x, ";"); for (i = 2; i <= n; i++) { split(x[i], y, ":"); if (y[2] + 0 <= $3 + 0) mark(y[1], "X " $2) } } next }
-$1 == "F" || $1 == "C" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
+$1 == "F" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
+$1 == "C" {
+  path = $2
+  while (path != "") {
+    if (path in cm) mark(cm[path], "C " path)
+    if (!sub(/\/[^/]*$/, "", path)) break
+  }
+  next
+}
 $1 == "T" { if ($2 in ct) mark(ct[$2], "T " $2); next }
 $1 == "S" { if ($2 in cs) mark(cs[$2], "S " $2); next }
 $1 == "D" { if ($2 in cd) entries(cd[$2], "", "D " $2); next }

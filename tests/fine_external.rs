@@ -91,7 +91,7 @@ fn changed_environment_and_checkout_time_invalidate_only_their_readers(bin: Iets
     let obs = dir.join("dag/obs");
     let old = fs::read_to_string(&obs)
         .unwrap()
-        .replace("V\tjob-trace-v3\n", "");
+        .replace("V\tjob-trace-v4\n", "");
     fs::write(obs, old).unwrap();
     let incompatible = bin
         .cmd()
@@ -137,16 +137,28 @@ fn scm_results_and_legacy_text_jobs_are_revalidated(bin: Iets) {
     let observed = fs::read_to_string(dir.join("jobs/0")).unwrap();
     assert!(observed.lines().any(|l| l.starts_with("Q\t")));
     let clean = fs::read_to_string(dir.join("jobs/1")).unwrap();
-    let legacy = clean.replace("V\tjob-trace-v3\n", "");
+    let legacy = clean.replace("V\tjob-trace-v4\n", "");
     fs::write(
         dir.join("traces"),
         format!("J\treader\n{observed}J\tclean\n{clean}J\tlegacy\n{legacy}"),
     )
     .unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental/fcheck.awk");
-    let run = || Command::new("awk").current_dir(dir).arg("-f").arg(script).args(["delta", "traces"]).output().unwrap();
+    let run = || {
+        Command::new("awk")
+            .current_dir(dir)
+            .arg("-f")
+            .arg(&script)
+            .args(["delta", "traces"])
+            .output()
+            .unwrap()
+    };
     assert!(!run().status.success());
-    fs::write(dir.join("traces"), format!("J\treader\n{observed}J\tclean\n{clean}")).unwrap();
+    fs::write(
+        dir.join("traces"),
+        format!("J\treader\n{observed}J\tclean\n{clean}"),
+    )
+    .unwrap();
     let result = run();
     assert!(result.status.success());
     assert!(stdout(&result).contains("reader\tr\t"));
