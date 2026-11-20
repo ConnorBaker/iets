@@ -1,9 +1,11 @@
 use std::collections::HashSet;
+use std::fs;
 
 use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
 
-use crate::print;
+use crate::api::value::Eval;
+use crate::{print, sys};
 
 fn eval_with(mut ev: Evaluator, src: &str) -> Result<String, String> {
     let v = ev
@@ -758,10 +760,6 @@ fn masks64_matches_the_scalar_masks() {
 
 #[test]
 fn flat_path_keeps_the_bytes_it_addressed() {
-    use crate::api::value::Eval;
-    use crate::sys;
-    use std::fs;
-
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("file");
     fs::write(&file, b"original").unwrap();
@@ -799,8 +797,8 @@ fn flat_path_keeps_the_bytes_it_addressed() {
 #[test]
 fn mismatched_path_does_not_register_the_computed_store_path() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("file"), b"wrong content").unwrap();
-    let base = crate::sys::path_to_internal(dir.path());
+    fs::write(dir.path().join("file"), b"wrong content").unwrap();
+    let base = sys::path_to_internal(dir.path());
     let mut ev = Evaluator::new();
     let initial = ev.known.origins().len();
     for recursive in [false, true] {
