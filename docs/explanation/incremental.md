@@ -70,8 +70,9 @@ plus signs and hyphens are written literally. File fields also permit slashes.
 Every other byte string, including the empty name, is written as `~` followed
 by its hexadecimal bytes. This keeps a quoted name containing a slash distinct
 from a nested binding path and a literal `"*"` distinct from a wildcard change.
-Region tables, flat traces and per-step changes carry a `V\t2` record. The DAG
-carries the version in the first word of `nodes`. Regenerate older artifacts
+Region tables and per-step changes carry a `V\t2` record. The DAG
+carries the name version in the first word of `nodes`; flat jobs declare
+their producer semantics with the cumulative generation described below. Regenerate older artifacts
 before comparing revisions or replaying queries.
 
 A Git revision reports paths by their repository names. A job that reads
@@ -94,8 +95,8 @@ guard that chose the list invalidates every existing position. A change
 read only while forcing one element invalidates that element. The last line
 of `roots`, `# list-control-v1`, marks graphs that recorded the list
 selection. Record older graphs again before using them with this checker.
-The text checker marks jobs without the corresponding `V` record dirty at
-every step.
+The cumulative text checker rejects jobs without its supported generation
+and complete begin/end framing; record those jobs again.
 
 For JSON output each element's trace covers its serialization, including
 attributes selected through `outPath`, calls to `__toString`, and path
@@ -442,4 +443,11 @@ The scripts of the measurements are in `bench/incremental/`. They expect a
 clone of nixpkgs at `~/incr/nixpkgs`, a worktree of it at `~/incr/base`, and
 the full evaluation of each commit in `~/incr/drvs/`.
 
-Local cumulative research format: a single job-trace-cumulative-v1 footer covers all admitted producer semantics; run-trace-cumulative-v1 names the aggregate channel. Existing standalone formats require re-recording. Names and changes retain their lossless V2 encoding, nodes retain the attr-order flag, and roots are published last.
+This local cumulative research format uses one `job-trace-cumulative-v1`
+footer for the admitted producer semantics. `run-trace-cumulative-v1` names
+the aggregate channel. Standalone formats require re-recording. Names and
+changes retain their lossless V2 encoding, nodes retain the attribute-order
+flag, and roots are published last. Fine capture is validated here with one
+worker; the shared schema does not implement helper-thread trace propagation.
+An existing job manifest also cannot discover added or removed positions:
+replay still needs fresh enumeration for cardinality changes.
