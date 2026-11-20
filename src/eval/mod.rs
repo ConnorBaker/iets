@@ -1025,7 +1025,8 @@ impl Evaluator {
     /// gets after the scope rule, so a store file under `scope = "root"` keys like
     /// an unlinted one. It carries the compile's lint warnings, which a load
     /// reports again, and the file's `# iets: allow` table for the runtime lints.
-    /// Files with `~/` paths bypass it. Embedded corepkgs are never linted.
+    /// Files with `~/` paths or an explicit base other than `dir_of(path)` bypass
+    /// it. Embedded corepkgs are never linted.
     pub fn compile_file(
         &mut self,
         path: &[u8],
@@ -1038,7 +1039,9 @@ impl Evaluator {
         let Some(cache) = self.ir_cache.clone() else {
             return self.compile_path(path, src, base_dir, None);
         };
-        if src.len() < cache.min_size {
+        // The key assumes the file's directory resolves relative literals.
+        // Public callers can supply another base; compile those without it.
+        if src.len() < cache.min_size || base_dir != dir_of(path) {
             return self.compile_path(path, src, base_dir, None);
         }
         let t0 = Instant::now();
@@ -1061,7 +1064,7 @@ impl Evaluator {
                 .stats
                 .note(Stat::Ir, self.arena.bytes_allocated - before);
             if loaded.is_none() {
-                cache.discard(&key);
+                cache.discard_rejected(&key, Some(&bytes));
             }
             if let Some((ir, diags, allows)) = loaded {
                 self.files[file.0 as usize].set_allows(allows);

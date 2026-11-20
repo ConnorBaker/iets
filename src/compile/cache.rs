@@ -30,7 +30,7 @@ use crate::runtime::{self, Kind, Word};
 use crate::session::Session;
 use crate::syntax::symbol::{FileSymbols, FxHashMap, Sym};
 use crate::trace::key::BUILD_ID;
-use std::io::Read;
+use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use std::{fs, slice};
@@ -207,8 +207,9 @@ impl IrCache {
             lint_key.as_bytes(),
             &[u8::from(pure)][..],
         ] {
+            // Public byte/string inputs may contain NUL; delimiters are ambiguous.
+            h.update(&(part.len() as u64).to_le_bytes());
             h.update(part);
-            h.update(b"\0");
         }
         h.update(src);
         h.finalize().to_hex().to_string()
@@ -224,24 +225,27 @@ impl IrCache {
     /// entry that fails it is poisoned like one that does not decode.
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
         let (f, md) = cachefs::open_entry(&self.entry(key)).file()?;
-        let mut bytes = Vec::with_capacity(md.len() as usize + 1);
-        let mut r = &f;
-        if r.read_to_end(&mut bytes).is_err() {
-            self.discard(key);
-            return None;
-        }
-        let Some(n) = bytes.len().checked_sub(cachefs::SUM) else {
-            self.discard(key);
+        let Ok(Some(bytes)) = Self::read_checked(key, &f, md.len()) else {
+            drop(f);
+            self.discard_rejected(key, None);
             return None;
         };
-        if bytes[n..] != cachefs::checksum(key, &[&bytes[..n]]) {
-            self.discard(key);
-            return None;
-        }
-        bytes.truncate(n);
         cachefs::touch_open(&f, md.modified().ok());
         self.hits.fetch_add(1, Ordering::Relaxed);
         Some(bytes)
+    }
+
+    fn read_checked(key: &str, mut file: &fs::File, len: u64) -> io::Result<Option<Vec<u8>>> {
+        let mut bytes = Vec::with_capacity(len as usize + 1);
+        file.read_to_end(&mut bytes)?;
+        let Some(n) = bytes.len().checked_sub(cachefs::SUM) else {
+            return Ok(None);
+        };
+        if bytes[n..] != cachefs::checksum(key, &[&bytes[..n]]) {
+            return Ok(None);
+        }
+        bytes.truncate(n);
+        Ok(Some(bytes))
     }
 
     /// How many entries this run read, the `ir-cache load` lines of
@@ -268,7 +272,26 @@ impl IrCache {
         }
     }
 
-    /// Poison and wipe, never repair: an entry that does not decode goes.
+    /// Recheck under the writer lock. Preserve any valid replacement whose
+    /// bytes differ from the payload that failed to decode.
+    pub(crate) fn discard_rejected(&self, key: &str, rejected: Option<&[u8]>) {
+        let Some(_lock) = cachefs::write_lock(&self.root) else {
+            return;
+        };
+        let path = self.entry(key);
+        let Some((file, md)) = cachefs::open_entry(&path).file() else {
+            return;
+        };
+        let Ok(current) = Self::read_checked(key, &file, md.len()) else {
+            return;
+        };
+        drop(file);
+        if current.is_none() || current.as_deref() == rejected {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    /// Remove the entry currently at this key.
     pub fn discard(&self, key: &str) {
         let _ = fs::remove_file(self.entry(key));
     }
@@ -1526,8 +1549,10 @@ mod tests {
 
     use std::collections::HashSet;
     use std::iter;
+    use std::sync::Arc;
     use std::thread::Builder;
 
+    use crate::eval::EvalConfig;
     use crate::print;
 
     const SRC: &str = "let f = a: with { x = a; }; [ x 1 true null \"s\" ./p 2.5 ]; in f 3\n";
@@ -1558,6 +1583,95 @@ mod tests {
             Ok(s) => s,
             Err(e) => format!("error: {}", e.msg),
         }
+    }
+
+    #[test]
+    fn compile_file_cache_respects_an_explicit_relative_path_base() {
+        let dir = tempdir().unwrap();
+        let mut cache = IrCache::locate(Some(dir.path().to_str().unwrap()), false).unwrap();
+        cache.min_size = 0;
+        cache.stats = false;
+        let cache = Arc::new(cache);
+        let mut ev = EvalConfig::new().ir_cache(Some(cache.clone())).build();
+        let mut cold = Evaluator::new();
+        let source = b"./payload";
+        let read = |ev: &mut Evaluator, base: &[u8]| {
+            let ir = ev.compile_file(PATH, source.to_vec(), base).unwrap();
+            let value = ev.eval(ev.root_env, ir).unwrap();
+            let runtime::Value::Path(path) = value.view() else {
+                panic!("path")
+            };
+            path.path.to_vec()
+        };
+        assert_eq!(read(&mut ev, b"/t"), b"/t/payload");
+        assert_eq!(read(&mut ev, b"/t"), b"/t/payload");
+        assert_eq!(cache.hits(), 1, "ordinary identical files still hit");
+        for base in [&b"/other"[..], &b"/other\0suffix"[..], &b"/t/"[..]] {
+            let expected = read(&mut cold, base);
+            assert_eq!(read(&mut ev, base), expected, "explicit base {base:?}");
+            assert_eq!(cache.hits(), 1, "noncanonical bases bypass the old key");
+        }
+        assert_eq!(read(&mut ev, b"/t"), b"/t/payload");
+        assert_eq!(
+            cache.hits(),
+            2,
+            "alternate bases cannot replace the ordinary entry"
+        );
+
+        // Starting with a custom base must not write an entry under the normal key.
+        let custom_dir = dir.path().join("custom-first");
+        let mut custom_cache = IrCache::locate(Some(custom_dir.to_str().unwrap()), false).unwrap();
+        custom_cache.min_size = 0;
+        custom_cache.stats = false;
+        let custom_cache = Arc::new(custom_cache);
+        let mut custom_first = EvalConfig::new()
+            .ir_cache(Some(custom_cache.clone()))
+            .build();
+        assert_eq!(read(&mut custom_first, b"/other"), b"/other/payload");
+        assert_eq!(read(&mut custom_first, b"/t"), b"/t/payload");
+        assert_eq!(custom_cache.hits(), 0);
+        assert_eq!(read(&mut custom_first, b"/t"), b"/t/payload");
+        assert_eq!(custom_cache.hits(), 1);
+    }
+
+    #[test]
+    fn compile_file_cache_nul_framing_preserves_current_system() {
+        let dir = tempdir().unwrap();
+        let mut cache = IrCache::locate(Some(dir.path().to_str().unwrap()), false).unwrap();
+        cache.min_size = 0;
+        cache.stats = false;
+        let cache = Arc::new(cache);
+        let mut first = EvalConfig::new()
+            .pure(false)
+            .system("right")
+            .ir_cache(Some(cache.clone()))
+            .build();
+        let mut second = EvalConfig::new()
+            .pure(false)
+            .system("left\0right")
+            .ir_cache(Some(cache.clone()))
+            .build();
+        let mut cold = EvalConfig::new().pure(false).system("left\0right").build();
+        let source = b"builtins.currentSystem";
+        let a = b"/t/f.nix\0left";
+        let b = b"/t/f.nix";
+        let read = |ev: &mut Evaluator, path: &[u8]| {
+            let ir = ev.compile_file(path, source.to_vec(), b"/t").unwrap();
+            let value = ev.eval(ev.root_env, ir).unwrap();
+            let value = ev.force(value).unwrap();
+            value.as_string().unwrap().bytes.to_vec()
+        };
+        assert_eq!(read(&mut first, a), b"right");
+        let expected = read(&mut cold, b);
+        assert_eq!(expected, b"left\0right");
+        assert_eq!(read(&mut second, b), expected);
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(read(&mut second, b), expected);
+        assert_eq!(
+            cache.hits(),
+            1,
+            "identical NUL-bearing configurations still hit"
+        );
     }
 
     /// Every case runs against one evaluator: building one and compiling
@@ -1667,6 +1781,30 @@ mod tests {
             // nothing about the evaluator
             assert!(loaded > 0, "case {n} accepted no changed byte");
         }
+    }
+
+    #[test]
+    fn rejecting_ir_preserves_a_siblings_replacement() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_str().expect("utf-8 path");
+        let reader = IrCache::locate(Some(root), false).unwrap();
+        let writer = IrCache::locate(Some(root), false).unwrap();
+        let key = "ab".repeat(32);
+        let (mut ev, valid, base, span) = entry();
+
+        writer.write(&key, b"not IR");
+        let rejected = reader.read(&key).unwrap();
+        assert!(deserialize(&mut ev, &rejected, base, span, false).is_none());
+        writer.write(&key, &valid);
+        assert_eq!(writer.read(&key).as_deref(), Some(valid.as_slice()));
+        reader.discard_rejected(&key, Some(&rejected));
+        reader.discard_rejected(&key, None);
+        let saved = reader.read(&key).expect("preserve the replacement");
+        assert!(deserialize(&mut ev, &saved, base, span, false).is_some());
+
+        writer.write(&key, &rejected);
+        reader.discard_rejected(&key, Some(&rejected));
+        assert!(!reader.entry(&key).exists());
     }
 
     /// The same flips through the store, where the integrity check makes each
