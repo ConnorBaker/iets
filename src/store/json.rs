@@ -214,10 +214,6 @@ impl Parser<'_> {
         match json_string::decode(self.s, &mut self.i) {
             Ok(text) => Ok(text),
             Err(e) => {
-                // This reader reports malformed hex at the start of its four digits.
-                if let StringError::Hex { start } = e {
-                    self.i = start;
-                }
                 if let StringError::Utf8 = e {
                     return self.invalid_utf8(self.i - 1);
                 }

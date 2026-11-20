@@ -614,12 +614,13 @@ fn json_string_crosses_a_raw_block() {
     );
     let mut invalid = doc.into_bytes();
     let lead = invalid.iter().position(|&b| b == 0xf0).unwrap();
-    invalid[lead + 2] = b'"';
+    let bad = lead + 2;
+    invalid[bad] = b'"';
     assert_eq!(
         normalise_structured_attrs(&invalid).unwrap_err().0,
         format!(
             "cannot process __json attribute: [json.exception.parse_error.101] parse error at line 1, column {}: syntax error while parsing value - invalid string: ill-formed UTF-8 byte",
-            lead + 2
+            bad + 1
         )
     );
 }
