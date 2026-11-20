@@ -1354,7 +1354,7 @@ mod ab {
                 .args(["-c", "(sleep 30 & wait) &"])
                 .status()
                 .unwrap();
-            assert!(!reap_after(Duration::from_secs(1), kill_leftovers).unwrap());
+            assert!(!reap_after(Duration::from_secs(1), CLEANUP_GRACE, kill_leftovers).unwrap());
             assert!(t.elapsed() < Duration::from_secs(10));
             assert_eq!(
                 direct.wait().unwrap_err().raw_os_error(),
@@ -1371,7 +1371,7 @@ mod ab {
             let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
             let listed = procfs.path().join(hidden.id().to_string());
             fs::create_dir(&listed).unwrap();
-            let result = reap_after(Duration::ZERO, |deadline| {
+            let result = reap_after(Duration::ZERO, CLEANUP_GRACE, |deadline| {
                 kill_leftovers_in(procfs.path(), deadline)
             });
             if result.is_err() {
@@ -1388,7 +1388,7 @@ mod ab {
             // A child omitted from both discovery sources must fail boundedly.
             let mut unknown = Command::new("sleep").arg("30").spawn().unwrap();
             let started = Instant::now();
-            let result = reap_after(Duration::ZERO, |deadline| {
+            let result = reap_after(Duration::ZERO, CLEANUP_GRACE, |deadline| {
                 kill_leftovers_in(procfs.path(), deadline)
             });
             unknown.kill().unwrap();
@@ -1407,7 +1407,6 @@ mod ab {
                 io::ErrorKind::NotFound
             );
         }
-
 
         #[cfg(target_os = "linux")]
         #[test]
