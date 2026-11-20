@@ -443,11 +443,11 @@ The scripts of the measurements are in `bench/incremental/`. They expect a
 clone of nixpkgs at `~/incr/nixpkgs`, a worktree of it at `~/incr/base`, and
 the full evaluation of each commit in `~/incr/drvs/`.
 
-This local cumulative research format uses one `job-trace-cumulative-v1`
-footer for the admitted producer semantics. `run-trace-cumulative-v1` names
+This local cumulative research format uses one `job-trace-cumulative-v2`
+footer for the admitted producer semantics. `run-trace-cumulative-v2` names
 the aggregate channel. Standalone formats require re-recording. Names and
 changes retain their lossless V2 encoding, nodes retain the attribute-order
-flag, and roots are published last. Fine capture is validated here with one
-worker; the shared schema does not implement helper-thread trace propagation.
+flag, and roots are published last. Fine capture always runs on one worker. Regenerate v1 captures, including
+single-worker captures, because v1 did not record the worker count.
 An existing job manifest also cannot discover added or removed positions:
 replay still needs fresh enumeration for cardinality changes.

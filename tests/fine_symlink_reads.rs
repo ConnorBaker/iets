@@ -122,7 +122,7 @@ fn symlink_reads_invalidate_only_their_consumers() {
 
     // Older recorders cannot establish which spellings the kernel followed.
     let obs = root.join("graph/obs");
-    let evidence = "V\tjob-trace-cumulative-v1\n";
+    let evidence = "V\tjob-trace-cumulative-v2\n";
     fs::write(
         &obs,
         fs::read_to_string(&obs).unwrap().replace(evidence, ""),

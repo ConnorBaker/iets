@@ -91,7 +91,7 @@ fn changed_environment_and_checkout_time_invalidate_only_their_readers(bin: Iets
     let obs = dir.join("dag/obs");
     let old = fs::read_to_string(&obs)
         .unwrap()
-        .replace("V\tjob-trace-cumulative-v1\n", "");
+        .replace("V\tjob-trace-cumulative-v2\n", "");
     fs::write(obs, old).unwrap();
     let incompatible = bin
         .cmd()
@@ -137,7 +137,7 @@ fn scm_results_and_legacy_text_jobs_are_revalidated(bin: Iets) {
     let observed = fs::read_to_string(dir.join("jobs/0")).unwrap();
     assert!(observed.lines().any(|l| l.starts_with("Q\t")));
     let clean = fs::read_to_string(dir.join("jobs/1")).unwrap();
-    let legacy = clean.replace("V\tjob-trace-cumulative-v1\n", "");
+    let legacy = clean.replace("V\tjob-trace-cumulative-v2\n", "");
     fs::write(
         dir.join("traces"),
         format!("J\treader\n{observed}J\tclean\n{clean}J\tlegacy\n{legacy}"),

@@ -2151,13 +2151,13 @@ fn require_stable_attr_order(dir: &str) -> io::Result<()> {
     Ok(())
 }
 
-const TRACE_VERSION: &str = "V\tjob-trace-cumulative-v1\n";
+const TRACE_VERSION: &str = "V\tjob-trace-cumulative-v2\n";
 
 fn write_trace_version(out: &mut String, job: bool) {
     out.push_str(if job {
         TRACE_VERSION
     } else {
-        "V\trun-trace-cumulative-v1\n"
+        "V\trun-trace-cumulative-v2\n"
     });
 }
 

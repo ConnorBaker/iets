@@ -66,8 +66,8 @@ fn uncacheable_forces_reach_job_graphs_and_flat_traces() {
     );
     assert!(answer.ends_with(",8,7]"));
     let whole = fs::read_to_string(root.join("whole")).unwrap();
-    assert!(whole.ends_with("V\trun-trace-cumulative-v1\n"));
-    assert!(!whole.contains("V\tjob-trace-cumulative-v1"));
+    assert!(whole.ends_with("V\trun-trace-cumulative-v2\n"));
+    assert!(!whole.contains("V\tjob-trace-cumulative-v2"));
     assert_eq!(check(), [0, 1]);
     let mut flat = String::new();
     for i in 0..3 {
@@ -86,11 +86,17 @@ fn uncacheable_forces_reach_job_graphs_and_flat_traces() {
             .collect::<Vec<_>>(),
         ["0", "1"]
     );
-    fs::write(&flat_file, flat.replace("V\tjob-trace-cumulative-v1\n", "")).unwrap();
+    fs::write(
+        &flat_file,
+        flat.replace("job-trace-cumulative-v2", "job-trace-cumulative-v1"),
+    )
+    .unwrap();
+    assert!(!text_check(&flat_file).status.success());
+    fs::write(&flat_file, flat.replace("V\tjob-trace-cumulative-v2\n", "")).unwrap();
     assert!(!text_check(&flat_file).status.success());
     fs::write(
         &flat_file,
-        flat.replace("V\tjob-trace-cumulative-v1\n", "V\tjob-trace-cumulative-v1"),
+        flat.replace("V\tjob-trace-cumulative-v2\n", "V\tjob-trace-cumulative-v2"),
     )
     .unwrap();
     assert!(!text_check(&flat_file).status.success());
@@ -101,7 +107,7 @@ fn uncacheable_forces_reach_job_graphs_and_flat_traces() {
     assert!(!text_check(&flat_file).status.success());
     let obs = graph.join("obs");
     let recorded = fs::read_to_string(&obs).unwrap();
-    fs::write(&obs, recorded.replace("V\tjob-trace-cumulative-v1\n", "")).unwrap();
+    fs::write(&obs, recorded.replace("V\tjob-trace-cumulative-v2\n", "")).unwrap();
     assert!(
         !runner
             .cmd()
