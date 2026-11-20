@@ -157,7 +157,7 @@ fn fine_text_checker_requires_regeneration_only_for_incomplete_jobs(bin: Iets) {
     assert!(stdout(&checked).is_empty());
     assert_eq!(
         stderr(&checked),
-        "regenerate the fine job trace for legacy with the current trace format"
+        "regenerate the fine job trace for legacy with the current trace format\n"
     );
 }
 

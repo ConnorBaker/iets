@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::{ptr, thread};
 
 use crate::eval::Evaluator;
+use crate::trace::fine;
 use crate::runtime::Arena;
 use crate::session::Session;
 
@@ -100,7 +101,7 @@ pub fn try_run<R: Send + 'static>(
     let _entered = ev.session().clone().enter();
     // Fine tracing keeps its observation stack on the calling thread. Only the
     // serial force path records edges when another slot reads a forced thunk.
-    if workers <= 1 || crate::trace::fine::on() {
+    if workers <= 1 || fine::on() {
         let r = f(&mut ev);
         ev.lints.flush();
         return Ok(r);
