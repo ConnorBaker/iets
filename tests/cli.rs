@@ -119,7 +119,7 @@ fn run_complete(mut c: Command, words: &[&str]) -> String {
 
 #[cfg(unix)]
 #[rstest]
-fn fine_text_checker_rereads_only_jobs_missing_the_list_control_marker(bin: Iets) {
+fn fine_text_checker_requires_regeneration_only_for_incomplete_jobs(bin: Iets) {
     let dir = tempdir().unwrap();
     let path = |name: &str| dir.path().join(name);
     fs::create_dir(path("jobs")).unwrap();
@@ -138,8 +138,7 @@ fn fine_text_checker_rereads_only_jobs_missing_the_list_control_marker(bin: Iets
             "[ 0 ]",
         ]));
     let current = fs::read_to_string(path("jobs/0")).unwrap();
-    let legacy = current.replace("V\tlist-control-v1\n", "");
-    assert_ne!(current, legacy);
+    let (legacy, _) = current.rsplit_once("V\t").unwrap();
     fs::write(path("changes"), "1\tV\t2\n1\tCR\tunrelated\t\n").unwrap();
     fs::write(
         path("traces"),
@@ -147,12 +146,19 @@ fn fine_text_checker_rereads_only_jobs_missing_the_list_control_marker(bin: Iets
     )
     .unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental/fcheck.awk");
-    let checked = ok(Command::new("awk")
+    let checked = Command::new("awk")
         .arg("-f")
         .arg(script)
         .arg(path("changes"))
-        .arg(path("traces")));
-    assert_eq!(stdout(&checked), "legacy\t1\tmissing list control trace");
+        .arg(path("traces"))
+        .output()
+        .unwrap();
+    assert!(!checked.status.success());
+    assert!(stdout(&checked).is_empty());
+    assert_eq!(
+        stderr(&checked),
+        "regenerate the fine job trace for legacy with the current trace format"
+    );
 }
 
 #[rstest]
