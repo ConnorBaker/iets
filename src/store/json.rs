@@ -217,10 +217,11 @@ impl Parser<'_> {
                 if let StringError::Utf8 = e {
                     return self.invalid_utf8(self.i - 1);
                 }
-                self.err(&format!(
-                    "syntax error while parsing value - invalid string: {}",
-                    e.reason(true)
-                ))
+                let message = format!("syntax error while parsing value - invalid string: {}", e.reason(true));
+                if let StringError::Hex = e {
+                    return self.error_at_byte(&message, self.i);
+                }
+                self.err(&message)
             }
         }
     }
@@ -236,9 +237,16 @@ impl Parser<'_> {
                 .error_len()
                 .map_or(self.s.len(), |prefix| start + prefix)
         };
+        self.error_at_byte(
+            "syntax error while parsing value - invalid string: ill-formed UTF-8 byte",
+            bad,
+        )
+    }
+
+    fn error_at_byte<T>(&self, what: &str, bad: usize) -> Result<T, DrvError> {
         let end = (bad + 1).min(self.s.len());
         Self::parse_error(
-            "syntax error while parsing value - invalid string: ill-formed UTF-8 byte",
+            what,
             &self.s[..end],
             usize::from(bad == self.s.len()),
         )
@@ -397,13 +405,15 @@ mod tests {
 
     #[test]
     fn what_nix_refuses() {
-        let cases: [(&[u8], &str); 11] = [
+        let cases: [(&[u8], &str); 13] = [
             (b"[1]", "type must be object, but is array"),
             (b"null", "type must be object, but is null"),
             (br#"{"a":1e400}"#, "number overflow parsing '1e400'"),
             (b"{\"a\":\"x\0y\"}", "control character must be escaped"),
             (br#"{"a":"\ud800"}"#, "invalid string"),
             (br#"{"n":"\u1z00"}"#, "line 1, column 10"),
+            (b"{\"n\":\"\\u12\n", "line 2, column 0"),
+            (br#"{"n":"\u12"#, "line 1, column 11"),
             (b"{\"a\":\"\xff\"}", "ill-formed UTF-8"),
             (br#"{"a":1} x"#, "expected end of input"),
             (b"", "unexpected end of input"),
