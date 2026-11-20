@@ -438,7 +438,7 @@ fn fine_root(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
             "while evaluating the argument passed to builtins.fineRoot",
         );
     };
-    crate::trace::fine::root(a);
+    fine::root(a);
     Ok(value)
 }
 
@@ -452,6 +452,6 @@ fn fine_query(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
             let _ = ev.force_cell(c);
         }
     }
-    let fp = crate::trace::fine::fingerprint_hex(&ev.interner, v);
+    let fp = fine::fingerprint_hex(&ev.interner, v);
     Ok(ev.mk_string(fp.as_bytes()))
 }
