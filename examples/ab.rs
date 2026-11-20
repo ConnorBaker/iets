@@ -1395,7 +1395,9 @@ mod ab {
                 let false_bin = env::split_paths(&env::var_os("PATH").unwrap())
                     .map(|dir| dir.join("false"))
                     .find(|path| path.is_file())
-                    .expect("the false utility");
+                    .expect("the false utility")
+                    .canonicalize()
+                    .unwrap();
                 for name in ["before", "after", "missing"] {
                     let bin = root.path().join(name);
                     if name != "missing" {
@@ -1425,10 +1427,19 @@ mod ab {
                 Some(false)
             );
             let t = Instant::now();
-            Command::new("sh")
-                // a leftover with a child of its own, which comes to us once it is killed
-                .args(["-c", "(sleep 30 & wait) &"])
-                .status()
+            // The subshell reports its child, then closes the pipes before waiting.
+            let nested = Command::new("sh")
+                .args([
+                    "-c",
+                    "(sleep 30 >/dev/null 2>&1 & echo $!; exec >/dev/null 2>&1; wait) &",
+                ])
+                .output()
+                .unwrap();
+            assert!(nested.status.success());
+            let nested: libc::pid_t = str::from_utf8(&nested.stdout)
+                .unwrap()
+                .trim()
+                .parse()
                 .unwrap();
             assert!(!reap_after(Duration::from_secs(1), CLEANUP_GRACE, kill_leftovers).unwrap());
             assert!(t.elapsed() < Duration::from_secs(10));
@@ -1436,6 +1447,10 @@ mod ab {
                 direct.wait().unwrap_err().raw_os_error(),
                 Some(libc::ECHILD)
             );
+
+            // SAFETY: signal zero only probes the reported process.
+            assert_eq!(unsafe { libc::kill(nested, 0) }, -1);
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
 
             // A successful last wait can return after the deadline without any children left.
             let mut last = Command::new("true").spawn().unwrap();
@@ -1503,29 +1518,34 @@ mod ab {
                 assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
             }
 
-            // No optional task children file: discover only the listed owned PID.
+            // Missing and readable task lists can both omit a live child.
             let procfs = tempfile::tempdir().unwrap();
             fs::create_dir_all(procfs.path().join("self/task/1")).unwrap();
             let own = process::id();
             let status = procfs.path().join("self/status");
             fs::write(&status, format!("NStgid:\t{own}\n")).unwrap();
             fs::create_dir(procfs.path().join(own.to_string())).unwrap();
-            let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
-            let listed = procfs.path().join(hidden.id().to_string());
-            fs::create_dir(&listed).unwrap();
-            let result = reap_after(Duration::ZERO, CLEANUP_GRACE, |deadline| {
-                kill_leftovers_in(procfs.path(), deadline)
-            });
-            if result.is_err() {
-                let _ = hidden.kill();
-                let _ = hidden.wait();
+            for readable in [false, true] {
+                if readable {
+                    fs::write(procfs.path().join("self/task/1/children"), "").unwrap();
+                }
+                let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
+                let listed = procfs.path().join(hidden.id().to_string());
+                fs::create_dir(&listed).unwrap();
+                let result = reap_after(Duration::ZERO, CLEANUP_GRACE, |deadline| {
+                    kill_leftovers_in(procfs.path(), deadline)
+                });
+                if result.is_err() {
+                    let _ = hidden.kill();
+                    let _ = hidden.wait();
+                }
+                assert!(!result.unwrap());
+                assert_eq!(
+                    hidden.wait().unwrap_err().raw_os_error(),
+                    Some(libc::ECHILD)
+                );
+                fs::remove_dir(listed).unwrap();
             }
-            assert!(!result.unwrap());
-            assert_eq!(
-                hidden.wait().unwrap_err().raw_os_error(),
-                Some(libc::ECHILD)
-            );
-            fs::remove_dir(listed).unwrap();
 
             // A child omitted from both discovery sources must fail boundedly.
             let mut unknown = Command::new("sleep").arg("30").spawn().unwrap();
