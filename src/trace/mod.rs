@@ -43,35 +43,14 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// The kind a `FileType` names. `of` takes the same decision from a
-    /// `Metadata`; a directory entry already carries the type, so a listing
-    /// needs no second `stat`.
+    /// Classify the file type supplied by a directory entry.
     pub fn of_file_type(ft: &fs::FileType) -> Kind {
-        if ft.is_symlink() {
-            Kind::Symlink
-        } else if ft.is_dir() {
-            Kind::Directory
-        } else if ft.is_file() {
-            Kind::Regular
-        } else {
-            Kind::Other
-        }
+        nar_kind(FileType::of(*ft))
     }
 
     pub fn of(r: &io::Result<fs::Metadata>) -> Kind {
         match r {
-            Ok(m) => {
-                let ft = m.file_type();
-                if ft.is_symlink() {
-                    Kind::Symlink
-                } else if ft.is_dir() {
-                    Kind::Directory
-                } else if ft.is_file() {
-                    Kind::Regular
-                } else {
-                    Kind::Other
-                }
-            }
+            Ok(m) => Self::of_file_type(&m.file_type()),
             Err(_) => Kind::Missing,
         }
     }
@@ -436,7 +415,7 @@ impl Trace {
 
     /// Stats `path` and records what it saw; returns the kind.
     pub fn stat_now(&self, path: &[u8], follow: bool) -> Kind {
-        let kind = stat_kind(&sys::path_from_internal(&sys::from_native(path)), follow);
+        let kind = stat_kind(&sys::native_path(&sys::from_native(path)), follow);
         self.stat(path, follow, kind);
         kind
     }
@@ -594,7 +573,7 @@ const RACY_NS: i64 = 2_000_000_000;
 const UNTRUSTED_MTIME: i64 = i64::MIN;
 
 pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
-    let at = sys::path_from_internal(path);
+    let at = sys::native_path(path);
     let (dev, ino) = file_id(&at, meta);
     let mtime = mtime_ns(meta);
     let now = SystemTime::now()
@@ -712,11 +691,19 @@ pub struct TreeFp {
 }
 
 impl TreeFp {
+    pub(crate) fn is_complete(&self) -> bool {
+        self.ok
+    }
+
+    pub(crate) fn newest(&self) -> i64 {
+        self.newest
+    }
+
     /// Seeds the fingerprint with the root's own `lstat`, the one node the
     /// dump never offers to the filter. `None` when the root cannot be read.
     pub fn new(root: &Path) -> Option<TreeFp> {
         let mut fp = TreeFp {
-            root_len: root.as_os_str().as_bytes().len(),
+            root_len: nar::walk_root(root).len(),
             stat_h: Sha256::new(),
             seen_h: Sha256::new(),
             newest: i64::MIN,
@@ -730,12 +717,9 @@ impl TreeFp {
     /// answered. Rejected entries reach `seen_hash` only, as in `walk_fp`.
     pub fn entry(&mut self, p: &Path, t: FileType, accepted: bool) {
         let rel = &p.as_os_str().as_bytes()[self.root_len..];
-        self.seen_h.update((rel.len() as u64).to_le_bytes());
-        self.seen_h.update(rel);
-        self.seen_h.update([nar_kind(t).to_u8()]);
+        hash_tree_entry(&mut self.seen_h, rel, nar_kind(t));
         if accepted {
-            let rel = rel.to_vec();
-            self.stat(p, &rel);
+            self.stat(p, rel);
         }
     }
 
@@ -744,23 +728,9 @@ impl TreeFp {
             self.ok = false;
             return;
         };
-        let kind = Kind::of(&Ok(st.clone()));
         self.newest = self.newest.max(mtime_secs(&st));
-        self.stat_h.update((rel.len() as u64).to_le_bytes());
-        self.stat_h.update(rel);
-        self.stat_h.update([kind.to_u8()]);
-        self.stat_h.update(st.len().to_le_bytes());
-        self.stat_h.update(mtime_ns(&st).to_le_bytes());
-        let (dev, ino) = file_id(p, &st);
-        self.stat_h.update(ctime_ns(p, &st).to_le_bytes());
-        self.stat_h.update(dev.to_le_bytes());
-        self.stat_h.update(ino.to_le_bytes());
-        self.stat_h.update(exec_bit(&st).to_le_bytes());
-        if kind == Kind::Symlink {
-            match fs::read_link(p) {
-                Ok(t) => self.stat_h.update(t.as_os_str().as_bytes()),
-                Err(_) => self.ok = false,
-            }
+        if hash_tree_stat(&mut self.stat_h, p, rel, &st).is_err() {
+            self.ok = false;
         }
     }
 
@@ -770,6 +740,28 @@ impl TreeFp {
         self.ok
             .then(|| (self.stat_h.finalize().into(), self.seen_h.finalize().into()))
     }
+}
+
+fn hash_tree_entry(h: &mut Sha256, rel: &[u8], kind: Kind) {
+    h.update((rel.len() as u64).to_le_bytes());
+    h.update(rel);
+    h.update([kind.to_u8()]);
+}
+
+fn hash_tree_stat(h: &mut Sha256, path: &Path, rel: &[u8], st: &fs::Metadata) -> io::Result<Kind> {
+    let kind = Kind::of_file_type(&st.file_type());
+    hash_tree_entry(h, rel, kind);
+    h.update(st.len().to_le_bytes());
+    h.update(mtime_ns(st).to_le_bytes());
+    let (dev, ino) = file_id(path, st);
+    h.update(ctime_ns(path, st).to_le_bytes());
+    h.update(dev.to_le_bytes());
+    h.update(ino.to_le_bytes());
+    h.update(exec_bit(st).to_le_bytes());
+    if kind == Kind::Symlink {
+        h.update(fs::read_link(path)?.as_os_str().as_bytes());
+    }
+    Ok(kind)
 }
 
 /// Walks `root` like the NAR dump does (sorted entries, no descent into
@@ -798,39 +790,20 @@ fn walk_fp(
         return Err(io::Error::other("tree too deep"));
     }
     let st = fs::symlink_metadata(path)?;
-    let kind = Kind::of(&Ok(st.clone()));
-    stat_h.update((rel.len() as u64).to_le_bytes());
-    stat_h.update(rel);
-    stat_h.update([kind.to_u8()]);
-    stat_h.update(st.len().to_le_bytes());
-    stat_h.update(mtime_ns(&st).to_le_bytes());
-    let (dev, ino) = file_id(path, &st);
-    stat_h.update(ctime_ns(path, &st).to_le_bytes());
-    stat_h.update(dev.to_le_bytes());
-    stat_h.update(ino.to_le_bytes());
-    stat_h.update(exec_bit(&st).to_le_bytes());
-    match kind {
-        Kind::Symlink => {
-            let t = fs::read_link(path)?;
-            stat_h.update(t.as_os_str().as_bytes());
-        }
-        Kind::Directory => {
-            let mut entries = read_dir_kinds(path)?;
-            entries.sort();
-            for (name, ekind) in entries {
-                let child = path.join(OsStr::from_bytes(&name));
-                let mut crel = rel.to_vec();
-                crel.push(b'/');
-                crel.extend_from_slice(&name);
-                seen_h.update((crel.len() as u64).to_le_bytes());
-                seen_h.update(&crel);
-                seen_h.update([ekind.to_u8()]);
-                if accepts(accepted, &child) {
-                    walk_fp(&child, &crel, accepted, stat_h, seen_h, depth + 1)?;
-                }
+    let kind = hash_tree_stat(stat_h, path, rel, &st)?;
+    if kind == Kind::Directory {
+        let mut entries = read_dir_kinds(path)?;
+        entries.sort();
+        for (name, ekind) in entries {
+            let child = path.join(OsStr::from_bytes(&name));
+            let mut crel = rel.to_vec();
+            crel.push(b'/');
+            crel.extend_from_slice(&name);
+            hash_tree_entry(seen_h, &crel, ekind);
+            if accepts(accepted, &child) {
+                walk_fp(&child, &crel, accepted, stat_h, seen_h, depth + 1)?;
             }
         }
-        _ => {}
     }
     Ok(())
 }
@@ -856,7 +829,7 @@ pub fn tree_rehash(
     Ok((hash_to_digest(&h), seen_hash, stat_hash, newest))
 }
 
-fn nar_kind(t: FileType) -> Kind {
+pub(crate) fn nar_kind(t: FileType) -> Kind {
     match t {
         FileType::Regular => Kind::Regular,
         FileType::Directory => Kind::Directory,
@@ -965,6 +938,18 @@ mod tests {
                 tree_fingerprint(&dir, accepted.as_ref()).unwrap()
             );
         }
+    }
+
+    #[rstest]
+    #[case("")]
+    #[case("/")]
+    #[case("////////////////")]
+    fn rehash_matches_walk_with_trailing_separators(#[from(tree)] dir: Tree, #[case] suffix: &str) {
+        let mut spelling = dir.as_os_str().to_owned();
+        spelling.push(suffix);
+        let root = Path::new(&spelling);
+        let (_, seen, stat, _) = tree_rehash(root, None).unwrap();
+        assert_eq!((stat, seen), tree_fingerprint(root, None).unwrap());
     }
 
     #[rstest]
