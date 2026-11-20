@@ -527,7 +527,11 @@ mod ab {
                         {
                             match signal(pid, observe_ready && !*waitable) {
                                 Ok(ready) => *waitable |= ready,
-                                Err(e) => *result = Err(e),
+                                Err(e) => {
+                                    if result.is_ok() {
+                                        *result = Err(e);
+                                    }
+                                }
                             }
                         }
                     }
@@ -545,7 +549,10 @@ mod ab {
         let mut revisit = Instant::now() + REAP_INTERVAL;
         let mut restart = None;
         for pass in 0..2 {
-            let mut entries = fs::read_dir(procfs)?;
+            let mut entries = match fs::read_dir(procfs) {
+                Ok(entries) => entries,
+                Err(e) => return result.and(Err(e)),
+            };
             while Instant::now() < deadline {
                 let Some(entry) = entries.next() else { break };
                 let now = Instant::now();
@@ -573,7 +580,9 @@ mod ab {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(e) => {
-                        result = Err(e);
+                        if result.is_ok() {
+                            result = Err(e);
+                        }
                         continue;
                     }
                 };
@@ -582,7 +591,11 @@ mod ab {
                     // incomplete, that checkpoint also checks global readiness.
                     match signal(pid, !direct && pass == 0 && !waitable) {
                         Ok(ready) => waitable |= ready,
-                        Err(e) => result = Err(e),
+                        Err(e) => {
+                            if result.is_ok() {
+                                result = Err(e);
+                            }
+                        }
                     }
                 }
             }
@@ -668,9 +681,9 @@ mod ab {
             if pid == -1 {
                 let e = io::Error::last_os_error();
                 match e.raw_os_error() {
-                    Some(libc::ECHILD) => return Ok(clean),
+                    Some(libc::ECHILD) => return sweep_error.map_or(Ok(clean), Err),
                     Some(libc::EINTR) => {}
-                    _ => return Err(e),
+                    _ => return Err(sweep_error.unwrap_or(e)),
                 }
             }
             if pid > 0 {
@@ -690,20 +703,20 @@ mod ab {
                     }
                     if pid != 0 {
                         // An exit or EINTR leaves the remaining count unknown.
-                        if !children_remain()? {
-                            return Ok(clean);
+                        if !children_remain().map_err(|e| sweep_error.take().unwrap_or(e))? {
+                            return sweep_error.map_or(Ok(clean), Err);
                         }
                     }
                     // Reaping a parent can expose a child after the previous
                     // sweep. Give it the same bounded direct-list attempt.
                     if !final_sweep_done && (clean || reaped_since_sweep) {
                         if let Err(e) = sweep(deadline) {
-                            sweep_error = Some(e);
+                            sweep_error.get_or_insert(e);
                         }
                         clean = false;
                         final_sweep_done = true;
-                        if !children_remain()? {
-                            return Ok(false);
+                        if !children_remain().map_err(|e| sweep_error.take().unwrap_or(e))? {
+                            return sweep_error.map_or(Ok(false), Err);
                         }
                         if final_polls > 0 {
                             final_polls -= 1;
@@ -721,7 +734,7 @@ mod ab {
                     // A killed process's children come to us in turn.
                     reaped_since_sweep = false;
                     if let Err(e) = sweep(deadline) {
-                        sweep_error = Some(e);
+                        sweep_error.get_or_insert(e);
                     }
                     just_swept = true;
                     continue;
@@ -1361,6 +1374,34 @@ mod ab {
                 Some(libc::ECHILD)
             );
 
+            // A successful last wait can return after the deadline without any children left.
+            let mut last = Command::new("true").spawn().unwrap();
+            let mut info = MaybeUninit::uninit();
+            // SAFETY: this test owns last; WNOWAIT leaves its exit for the outer reaper.
+            assert_eq!(
+                unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        last.id(),
+                        info.as_mut_ptr(),
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                },
+                0
+            );
+            assert!(reap_after(Duration::ZERO, Duration::ZERO, |_| unreachable!()).unwrap());
+            assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+
+            // A partially failed sweep still leaves the outer reaper responsible for exits.
+            let mut last = Command::new("sleep").arg("30").spawn().unwrap();
+            let err = reap_after(Duration::ZERO, CLEANUP_GRACE, |_| {
+                last.kill()?;
+                Err(io::Error::from_raw_os_error(libc::EPERM))
+            })
+            .unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+            assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+
             // No optional task children file: discover only the listed owned PID.
             let procfs = tempfile::tempdir().unwrap();
             fs::create_dir_all(procfs.path().join("self/task/1")).unwrap();
@@ -1745,11 +1786,11 @@ mod ab {
                 }
                 assert_eq!(sweeps, 2);
                 if complete {
-                    assert!(
-                        result.is_ok(),
-                        "a final sweep error prevented ready-exit draining: {result:?}"
-                    );
-                    assert!(!result.unwrap());
+                    if sweep_fails {
+                        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+                    } else {
+                        assert!(!result.unwrap());
+                    }
                     assert_eq!(reaped, -1);
                     assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
                 } else {
