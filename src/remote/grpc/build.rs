@@ -183,7 +183,7 @@ impl ChunkShip {
         self.tx
             .blocking_send(proto::AddMultipleChunk {
                 repair: false,
-                check_sigs: false,
+                check_sigs: true,
                 data,
             })
             .map_err(|_| closed())
@@ -208,9 +208,8 @@ impl Write for ChunkShip {
 /// count, then each `ValidPathInfo` at 1.16 followed by its NAR), from the same
 /// `write_object` the worker transport uses. Like the C++ sink, the stream is
 /// flushed once, at the end; the reader decodes a partial frame fine.
-/// `check_sigs` is false because every path sent is content-addressed, so the
-/// daemon recomputes its address. For a `write` token the server forces
-/// `CheckSigs` on anyway (daemon/main.cc), which those paths still pass.
+/// `check_sigs`: a `fetchClosure` path may be input-addressed, so only its
+/// narinfo's signatures vouch for it; CA sources and drvs need none.
 pub fn add_multiple(c: &mut Client, objects: &[&Object], t: &mut Timings) -> Result<u64> {
     let deadline = Instant::now() + Duration::from_secs(c.cfg.connect_timeout);
     let mut pause = Duration::from_millis(500);
@@ -253,7 +252,7 @@ fn upload(
                 // follows in its own messages.
                 tx.blocking_send(proto::AddMultipleChunk {
                     repair: false,
-                    check_sigs: false,
+                    check_sigs: true,
                     data: Vec::new(),
                 })
                 .map_err(|_| closed())?;
@@ -880,6 +879,32 @@ mod tests {
     use super::*;
 
     use crate::build::backend::tests::every_timing;
+
+    #[test]
+    fn upload_chunks_always_request_signature_checks() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let sent = Arc::new(AtomicU64::new(0));
+        let mut ship = ChunkShip {
+            tx,
+            buf: Vec::new(),
+            sent: Arc::clone(&sent),
+        };
+        ship.flush().unwrap();
+        assert!(rx.try_recv().is_err());
+        let full = vec![7; CHUNK];
+        ship.write_all(&full).unwrap();
+        ship.write_all(b"tail").unwrap();
+        ship.flush().unwrap();
+        drop(ship);
+        for expected in [&full[..], &b"tail"[..]] {
+            let chunk = rx.blocking_recv().unwrap();
+            assert!(chunk.check_sigs);
+            assert!(!chunk.repair);
+            assert_eq!(chunk.data, expected);
+        }
+        assert!(rx.blocking_recv().is_none());
+        assert_eq!(sent.load(Ordering::Relaxed), (CHUNK + 4) as u64);
+    }
 
     #[test]
     fn the_request_carries_the_build_limits() {
