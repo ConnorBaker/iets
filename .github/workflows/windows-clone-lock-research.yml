@@ -22,6 +22,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - name: Freeze source and build
         shell: pwsh
         run: |
@@ -31,21 +32,14 @@ jobs:
           rustc -vV | Out-File receipts/rustc.txt
           cargo test --locked --lib --no-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Repeated focused observations
+      - name: One complete upstream Windows test command
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
           $ErrorActionPreference = 'Continue'
-          $rows = @()
-          if ('${{ matrix.source }}' -eq 'diagnostic') {
-            cargo test --locked --lib cachefs::tests::diagnostic_unlink_while_a_handle_is_open -- --exact --nocapture *> receipts/direct-unlink.log
-            $rows += @{case='direct-unlink'; repeat=0; exit=$LASTEXITCODE}
-          }
-          for ($i=0; $i -lt 8; $i++) {
-            cargo test --locked --lib cachefs::tests::a_clone_lock_excludes_across_a_sweep -- --exact --nocapture *> "receipts/race-$i.log"
-            $rows += @{case='race'; repeat=$i; exit=$LASTEXITCODE}
-          }
-          $rows | ConvertTo-Json | Out-File receipts/results.json
+          Get-CimInstance Win32_ComputerSystem | Select-Object NumberOfLogicalProcessors,TotalPhysicalMemory | ConvertTo-Json | Out-File receipts/host.json
+          cargo nextest run --locked --no-fail-fast *> receipts/full-nextest.log
+          @{case='full-nextest'; exit=$LASTEXITCODE} | ConvertTo-Json | Out-File receipts/results.json
           Get-Content receipts/results.json
           # Diagnostic completion records failures; this is not a green product check.
           exit 0
