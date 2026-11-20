@@ -1763,6 +1763,8 @@ mod tests {
     fn census_queries_preserve_intervening_marks() {
         let mut arena = Arena::new();
         let a = build(&mut arena, &[vec![(1, 1), (3, 3)], vec![(2, 2), (3, 4)]]);
+        // Construction may cache the length for the census; exercise a cold cache.
+        a.len.store(u32::MAX, Ordering::Relaxed);
         assert_eq!(a.len_raw(), u32::MAX);
         assert_eq!(a.flags.load(Ordering::Relaxed), 0);
         let begin = Barrier::new(2);
@@ -1790,6 +1792,8 @@ mod tests {
     fn reporting_unknown_union_does_not_mark_it_used() {
         let mut arena = Arena::new();
         let a = build(&mut arena, &[vec![(1, 1)], vec![(2, 2)]]);
+        // Construction may cache the length for the census; exercise a cold cache.
+        a.len.store(u32::MAX, Ordering::Relaxed);
         assert_eq!(a.len_raw(), u32::MAX);
         let mut first = String::new();
         arena.stats.census.report(&mut first);
@@ -1831,6 +1835,8 @@ mod tests {
         for marked in [false, true] {
             let a = build(&mut arena, &[vec![(1, 1)], vec![(2, 2)], vec![(3, 3)]]);
             assert_eq!(a.leaves, 3);
+            // Construction may cache the length for the census; exercise a cold cache.
+            a.len.store(u32::MAX, Ordering::Relaxed);
             assert_eq!(a.len_raw(), u32::MAX);
             if marked {
                 assert!(a.get(Sym(1)).is_some());
