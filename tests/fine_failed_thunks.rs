@@ -38,9 +38,10 @@ fn caught_shared_failure_invalidates_every_reader(bin: Iets) {
         format!("s\tV\t2\ns\tCM\t{}\n", path("flag").display()),
     )
     .unwrap();
-    let checked = stdout(&ok(bin
-        .cmd()
-        .current_dir(dir.path())
-        .args(["fine-check", "delta", "dag"])));
+    let checked = stdout(&ok(bin.cmd().current_dir(dir.path()).args([
+        "fine-check",
+        "delta",
+        "dag",
+    ])));
     assert_eq!(checked, "dag\t0\ts\ndag\t1\ts");
 }
