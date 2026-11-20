@@ -1,6 +1,6 @@
 //! The fine trace: what an evaluation read, at the grain of a binding. A
 //! prototype for incremental evaluation, on only when `IETS_FINE_TRACE`
-//! names the file to write, and only at one worker.
+//! names the file to write. Capturing a trace runs the evaluator on one worker.
 //!
 //! A set or `let` of `FINE_MIN` bindings or more makes each binding a region
 //! of its own: the compiler wraps its value in `Ir::Region`, so an edit to

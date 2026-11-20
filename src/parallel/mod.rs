@@ -95,7 +95,9 @@ pub fn try_run<R: Send + 'static>(
     mut ev: Evaluator,
     f: impl FnOnce(&mut Evaluator) -> R + Send + 'static,
 ) -> Result<R, fiber::StackError> {
-    if workers <= 1 {
+    // Fine tracing keeps its observation stack on the calling thread. Only the
+    // serial force path records edges when another slot reads a forced thunk.
+    if workers <= 1 || crate::trace::fine::on() {
         let r = f(&mut ev);
         ev.lints.flush();
         return Ok(r);
