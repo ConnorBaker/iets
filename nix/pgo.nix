@@ -1,6 +1,6 @@
 # Optional experiments, deliberately outside packages/checks: training is a
 # build input, whereas performance measurements must run outside derivations.
-{ lib, stdenv, commonArgs, iets, benchmarks, nixpkgs, rustc, binutils
+{ lib, stdenv, commonArgs, iets, nixpkgs, rustc, binutils
 , runCommand, writeShellScript, symlinkJoin, coreutils, diffutils }:
 let
   llvm = rustc.llvmPackages.llvm;
@@ -85,19 +85,19 @@ let
     }
     for workers in 1 4; do
       run "server-w$workers" eval --impure --strict --no-cache --workers "$workers" \
-        -I nixpkgs=${nixpkgs} ${benchmarks.workloads}/nixos-server.nix
+        -I nixpkgs=${nixpkgs} ${../bench/workloads/nixos-server.nix}
     done
     # Populate IR/tracing caches, then train their distinct execution paths.
     run server-cache-fill eval --impure --strict --workers 1 \
-      -I nixpkgs=${nixpkgs} ${benchmarks.workloads}/nixos-server.nix
+      -I nixpkgs=${nixpkgs} ${../bench/workloads/nixos-server.nix}
     run server-cache-hit eval --impure --strict --workers 1 \
-      -I nixpkgs=${nixpkgs} ${benchmarks.workloads}/nixos-server.nix
+      -I nixpkgs=${nixpkgs} ${../bench/workloads/nixos-server.nix}
     run server-warm-ir eval --impure --strict --no-tracing-cache --workers 1 \
-      -I nixpkgs=${nixpkgs} ${benchmarks.workloads}/nixos-server.nix
-    for workload in calls strings attrs derivations; do
-      run "$workload" eval --strict --json --no-cache --workers 1 \
-        ${benchmarks.workloads}/synthetic/"$workload".nix
-    done
+      -I nixpkgs=${nixpkgs} ${../bench/workloads/nixos-server.nix}
+    ${lib.concatMapStringsSep "\n" (name: ''
+      run "${name}" eval --strict --json --no-cache --workers 1 \
+        ${../bench/workloads/synthetic + "/${name}.nix"}
+    '') [ "calls" "strings" "attrs" "derivations" ]}
   '';
   profile = runCommand "iets-pgo-profile" {
     nativeBuildInputs = [ llvm coreutils diffutils ];

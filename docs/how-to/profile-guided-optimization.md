@@ -73,18 +73,18 @@ nix build .#experiments.x86_64-linux.profile -o result-profile
 nix shell .#experiments.x86_64-linux.tools --command \
   llvm-profdata show --topn=20 result-profile/merged.profdata
 cat result-pgo-bolt/bolt.log
-nix run .#bench-ab -- "$PWD/result-baseline/bin/iets" "$PWD/result-pgo/bin/iets" \
-  --only plasma --rounds 10 --max-rounds 10 --json pgo-plasma.json
-nix run .#bench-ab -- "$PWD/result-pgo/bin/iets" "$PWD/result-pgo-bolt/bin/iets" \
-  --only plasma --rounds 10 --max-rounds 10 --json bolt-plasma.json
+nix develop -c cargo run --release --locked --example ab -- "$PWD/result-baseline/bin/iets" "$PWD/result-pgo/bin/iets" \
+  --only minimal --rounds 10 --max-rounds 10 --json pgo-minimal.json
+nix develop -c cargo run --release --locked --example ab -- "$PWD/result-pgo/bin/iets" "$PWD/result-pgo-bolt/bin/iets" \
+  --only minimal --rounds 10 --max-rounds 10 --json bolt-minimal.json
 ```
 
-Repeat with `--only minimal`. Compare the ordinary production executable with
+Repeat with `--only nixos/server-w1`. Compare the ordinary production executable with
 the matched baseline to check for linker-setting effects. Use the same CPU set
 for the whole comparison (`taskset -c CPU-LIST`), especially across different
 cache clusters. Avoid competing builds/profilers, record system load, and check
 output parity. Fixed pair counts avoid stopping based on interim results.
-See the [benchmark guide](benchmark.md) for whole-Nixpkgs commands and profiling.
+Pass `--full --only outpaths` to the runner for a whole-Nixpkgs comparison.
 
 The full x86 pipeline passed nine-output training checks, all eight Gungraun
 checks and a 36-run whole-Nixpkgs output comparison at 1/2/4/8 workers. Shared-host
