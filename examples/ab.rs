@@ -488,10 +488,24 @@ mod ab {
         let mut result = Ok(());
         let signal = |pid, observe_ready| {
             // Leave exits for the outer reaper, which tracks newly adopted children.
-            if pid > 0 && children_remain_for(libc::P_PID, pid as libc::id_t)? {
+            if pid > 0 {
+                match children_state(libc::P_PID, pid as libc::id_t)? {
+                    None => return Ok(false),
+                    Some(true) => return Ok(observe_ready),
+                    Some(false) => {}
+                }
                 // SAFETY: this is our child; the sole reaper cannot recycle its PID.
                 if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
                     let e = io::Error::last_os_error();
+                    // A child may exit after the probe, losing signal permission first.
+                    if e.raw_os_error() == Some(libc::EPERM)
+                        && matches!(
+                            children_state(libc::P_PID, pid as libc::id_t),
+                            Ok(Some(true))
+                        )
+                    {
+                        return Ok(observe_ready);
+                    }
                     if e.raw_os_error() != Some(libc::ESRCH) {
                         return Err(e);
                     }
@@ -1406,6 +1420,10 @@ mod ab {
             }
             assert!(Command::new("true").status().unwrap().success());
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
+            assert_eq!(
+                children_state(libc::P_PID, direct.id()).unwrap(),
+                Some(false)
+            );
             let t = Instant::now();
             Command::new("sh")
                 // a leftover with a child of its own, which comes to us once it is killed
@@ -1434,8 +1452,10 @@ mod ab {
                 },
                 0
             );
+            assert_eq!(children_state(libc::P_PID, last.id()).unwrap(), Some(true));
             assert!(reap_after(Duration::ZERO, Duration::ZERO, |_| unreachable!()).unwrap());
             assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            assert_eq!(children_state(libc::P_PID, last.id()).unwrap(), None);
 
             // Exhausting discovery is harmless only once the last child is confirmed gone.
             let mut last = Command::new("sleep").arg("30").spawn().unwrap();
@@ -2008,10 +2028,16 @@ mod ab {
             assert!(check_proc_namespace(root, false).is_err());
             assert!(check_proc_namespace(root, true).is_err());
             fs::set_permissions(&status, fs::Permissions::from_mode(0o000)).unwrap();
-            check_proc_namespace(root, false).unwrap();
-            let denied = check_proc_namespace(root, true);
+            // CAP_DAC_OVERRIDE can keep mode-000 files readable.
+            if let Err(e) = fs::read(&status) {
+                assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+                check_proc_namespace(root, false).unwrap();
+                assert_eq!(
+                    check_proc_namespace(root, true).unwrap_err().kind(),
+                    io::ErrorKind::PermissionDenied
+                );
+            }
             fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();
-            assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
             fs::remove_file(&status).unwrap();
             check_proc_namespace(root, false).unwrap();
             assert_eq!(
