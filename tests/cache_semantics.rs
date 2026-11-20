@@ -759,7 +759,7 @@ fn nested_job_output(
     }
     let obs = work.path("dag/obs");
     let records = fs::read_to_string(&obs).unwrap();
-    fs::write(obs, records.replace("V\tjob-output-v1\n", "")).unwrap();
+    fs::write(obs, records.replace("V\tjob-trace-cumulative-v1\n", "")).unwrap();
     let stale = work
         .iets()
         .args(["fine-check", &work.s("changes"), &dag])
@@ -776,7 +776,7 @@ fn json_jobs_share_a_path_copy_trace(work: Work) {
     assert!(run.status.success(), "{}", stderr(&run));
     for i in 0..3 {
         let trace = fs::read_to_string(work.path(&format!("jobs/{i}"))).unwrap();
-        assert!(trace.ends_with("V\tjob-output-v1\n"), "{trace}");
+        assert!(trace.ends_with("V\tjob-trace-cumulative-v1\n"), "{trace}");
     }
     let output: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     assert!(output[0].as_str().unwrap().ends_with("-payload"));

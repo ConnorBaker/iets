@@ -74,6 +74,16 @@ Region tables, flat traces and per-step changes carry a `V\t2` record. The DAG
 carries the version in the first word of `nodes`. Regenerate older artifacts
 before comparing revisions or replaying queries.
 
+A Git revision reports paths by their repository names. A job that reads
+`builtins.readFile ./link` can observe new bytes even when only the target
+appears in the diff. The fine recorder marks the reading force as volatile
+when it follows a physical symlink. Any revision step then invalidates jobs
+that consumed that force. Reading the type of the link itself uses its
+ordinary type dependency. For paths through ordinary directories the checker
+also tracks replacement of an ancestor, which can make a previously absent
+name appear through a new link. Graphs and flat job traces from before this
+evidence was recorded need a fresh recording.
+
 `IETS_FINE_DAG=DIR` writes the traces of a run as one graph, with the trace
 of each job of the result list. `iets fine-check CHANGES DAG...` marks the
 changed observations and makes one pass over the graph, in the order the
@@ -86,6 +96,7 @@ of `roots`, `# list-control-v1`, marks graphs that recorded the list
 selection. Record older graphs again before using them with this checker.
 The text checker marks jobs without the corresponding `V` record dirty at
 every step.
+
 For JSON output each element's trace covers its serialization, including
 attributes selected through `outPath`, calls to `__toString`, and path
 copies. These dependencies can arise after forcing the element itself.
@@ -114,6 +125,7 @@ An `iets eval` with `IETS_FINE_TRACE` set evaluates the request even when
 its rendered result is already cached. Check the command's exit status
 before consuming any requested trace files. A write failure reports the
 destination and fails the command even if it already printed its result.
+
 
 Each validation step rechecks jobs that read the process environment, ask
 an SCM about its working tree, use a fetched input's local store entry, or
@@ -429,3 +441,5 @@ builtins.fineQuery VALUE                                       # the fingerprint
 The scripts of the measurements are in `bench/incremental/`. They expect a
 clone of nixpkgs at `~/incr/nixpkgs`, a worktree of it at `~/incr/base`, and
 the full evaluation of each commit in `~/incr/drvs/`.
+
+Local cumulative research format: a single job-trace-cumulative-v1 footer covers all admitted producer semantics; run-trace-cumulative-v1 names the aggregate channel. Existing standalone formats require re-recording. Names and changes retain their lossless V2 encoding, nodes retain the attr-order flag, and roots are published last.

@@ -2,6 +2,12 @@
 # fchg.all holds "step\tchange" lines; TRACES holds "J\tjob" and then the job's trace.
 # skip drops the whole reads (A) whose Nix call or stack matches it: what a fix at those sites would give.
 BEGIN { FS = OFS = "\t" }
+function init_ascii(    i, c) {
+  for (i = 32; i < 127; i++) {
+    c = sprintf("%c", i)
+    if (c ~ /^[a-zA-Z0-9._+\/-]$/) ascii[sprintf("%02x", i)] = c
+  }
+}
 FILENAME == ARGV[1] {
   s = $1
   step[s] = 1
@@ -26,25 +32,19 @@ function entries(e, name, why,    n, x, i, y) {
 }
 function flush(   s) {
   if (job != "") {
-    if (!order_version) for (s in step) inv[s] = "legacy trace"
-    if (!external_version) for (s in step) inv[s] = "missing external read evidence"
-    if (!list_control) for (s in step) inv[s] = "missing list control trace"
-    if (!trace_version) { print "regenerate job traces" > "/dev/stderr"; failed = 1 }
-    if (!volatile_format) { print "regenerate the job trace to record uncacheable forces" > "/dev/stderr"; failed = 1 }
-    if (!output_version) { print "regenerate the fine job trace for " job " to record job output demands" > "/dev/stderr"; failed = 1 }
-    for (s in inv) print job, s, inv[s]
+    if (!complete) {
+      print "regenerate the fine job trace for " job " with the current trace format" > "/dev/stderr"
+      failed = 1
+    } else for (s in inv) print job, s, inv[s]
   }
-  delete inv; delete pc; external_version = 0; volatile_format = 0; trace_version = 0; order_version = 0; output_version = 0; list_control = 0
+  delete inv; delete pc; complete = started = 0
 }
 $1 == "J" { flush(); job = $2; next }
+$0 == "B" && !started { started = 1; next }
+$0 == "V\tjob-trace-cumulative-v1" && started && !complete { complete = 1; next }
+!started || complete || $0 == "B" || /^V/ { print "invalid fine job trace for " job > "/dev/stderr"; failed = 1; next }
 $1 == "R" && $2 == "?" { for (s in step) inv[s] = "untracked " $3; next }
-$1 == "V" && $2 == "2" { trace_version = 1; next }
-$0 == "V\texternal-reads-v1" { external_version = 1; next }
 $1 == "E" || $1 == "Q" || $1 == "I" || $1 == "TreeMtime" { for (s in step) inv[s] = "external read " $1; next }
-$0 == "V\tvolatile-v1" { volatile_format = 1; next }
-$0 == "V\tjob-output-v1" { output_version = 1; next }
-$0 == "V\tlist-control-v1" { list_control = 1; next }
-$1 == "V" && $2 == "attr-order-1" { order_version = 1; next }
 $1 == "AttrOrder" { for (s in step) inv[s] = "attrset comparison order"; next }
 $1 == "R" { k = $2 "\t" $3; if (k in cr) mark(cr[k], "R " $2 " " $3); if ($2 in cf) mark(cf[$2], "R " $2); next }
 $1 == "P" {
@@ -58,7 +58,32 @@ $1 == "P" {
 $1 == "K" { if (pc[$2] != "" && ($3 in cn || index(pc[$2], ":*"))) entries(pc[$2], $3, "K " $3); next }
 $1 == "A" { if (pc[$2] != "" && !(skip != "" && ($4 " " $5) ~ skip)) entries(pc[$2], "", "A " $3 " " $4); next }
 $1 == "X" { if ($2 in cx) { n = split(cx[$2], x, ";"); for (i = 2; i <= n; i++) { split(x[i], y, ":"); if (y[2] + 0 <= $3 + 0) mark(y[1], "X " $2) } } next }
-$1 == "F" || $1 == "C" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
+$1 == "F" { if ($2 in cm) mark(cm[$2], $1 " " $2); next }
+$1 == "C" {
+  path = $2
+  if (substr(path, 1, 1) == "~") {
+    if (!("2f" in ascii)) init_ascii()
+    # The plain prefix ends at the first byte that requires encoding.
+    plain = 1; prefix = ""
+    for (i = 2; i <= length(path); i += 2) {
+      byte = substr(path, i, 2)
+      if (byte !~ /^[0-9a-f][0-9a-f]$/) { for (s in step) inv[s] = "malformed path"; next }
+      if (byte == "2f") {
+        key = i == 2 ? "/" : (plain ? prefix : substr(path, 1, i - 1))
+        if (key in cm) mark(cm[key], "C " key)
+      }
+      if (plain && byte in ascii) prefix = prefix ascii[byte]
+      else plain = 0
+    }
+    if (path in cm) mark(cm[path], "C " path)
+    next
+  }
+  while (path != "") {
+    if (path in cm) mark(cm[path], "C " path)
+    if (!sub(/\/[^/]*$/, "", path)) break
+  }
+  next
+}
 $1 == "T" { if ($2 in ct) mark(ct[$2], "T " $2); next }
 $1 == "S" { if ($2 in cs) mark(cs[$2], "S " $2); next }
 $1 == "D" { if ($2 in cd) entries(cd[$2], "", "D " $2); next }

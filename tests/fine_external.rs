@@ -91,7 +91,7 @@ fn changed_environment_and_checkout_time_invalidate_only_their_readers(bin: Iets
     let obs = dir.join("dag/obs");
     let old = fs::read_to_string(&obs)
         .unwrap()
-        .replace("V\texternal-reads-v1\n", "");
+        .replace("V\tjob-trace-cumulative-v1\n", "");
     fs::write(obs, old).unwrap();
     let incompatible = bin
         .cmd()
@@ -100,7 +100,7 @@ fn changed_environment_and_checkout_time_invalidate_only_their_readers(bin: Iets
         .output()
         .unwrap();
     assert!(!incompatible.status.success());
-    assert!(stderr(&incompatible).contains("external read evidence"));
+    assert!(stderr(&incompatible).contains("regenerate"));
 }
 
 #[cfg(unix)]
@@ -137,23 +137,32 @@ fn scm_results_and_legacy_text_jobs_are_revalidated(bin: Iets) {
     let observed = fs::read_to_string(dir.join("jobs/0")).unwrap();
     assert!(observed.lines().any(|l| l.starts_with("Q\t")));
     let clean = fs::read_to_string(dir.join("jobs/1")).unwrap();
-    let legacy = clean.replace("V\texternal-reads-v1\n", "");
+    let legacy = clean.replace("V\tjob-trace-cumulative-v1\n", "");
     fs::write(
         dir.join("traces"),
         format!("J\treader\n{observed}J\tclean\n{clean}J\tlegacy\n{legacy}"),
     )
     .unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental/fcheck.awk");
-    let result = stdout(&ok(Command::new("awk")
-        .current_dir(dir)
-        .arg("-f")
-        .arg(script)
-        .args(["delta", "traces"])));
-    assert!(
-        result.contains("reader\tr\t") && result.contains("legacy\tr\t"),
-        "{result}"
-    );
-    assert!(!result.contains("clean\tr\t"), "{result}");
+    let run = || {
+        Command::new("awk")
+            .current_dir(dir)
+            .arg("-f")
+            .arg(&script)
+            .args(["delta", "traces"])
+            .output()
+            .unwrap()
+    };
+    assert!(!run().status.success());
+    fs::write(
+        dir.join("traces"),
+        format!("J\treader\n{observed}J\tclean\n{clean}"),
+    )
+    .unwrap();
+    let result = run();
+    assert!(result.status.success());
+    assert!(stdout(&result).contains("reader\tr\t"));
+    assert!(!stdout(&result).contains("clean\tr\t"));
 }
 
 #[cfg(unix)]
