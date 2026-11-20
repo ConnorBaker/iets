@@ -22,7 +22,8 @@ use crate::builtins::derivation::DrvState;
 use crate::builtins::{self, store_hooks};
 use crate::compile::cache::{self, IrCache};
 use crate::compile::ir::{
-    AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, ParamIr, SelectIr,
+    AttrElemIr, AttrsIr, BindIr, BindScope, ConstOrigin, Ir, IrRef, LambdaIr, LetIr, ParamIr,
+    SelectIr,
 };
 use crate::compile::{self, Compiler, Globals};
 use crate::events::{self, Field, Group};
@@ -1158,37 +1159,33 @@ impl Evaluator {
             return Ok(p);
         }
         store_hooks::confine(self, &p, store_hooks::Follow::Full, pos)?;
-        let mut at = store_hooks::open(self, &p, pos)?;
+        let origin = store_hooks::locate(self, &p);
+        let host = origin.is_none();
+        let at = store_hooks::check(self, origin, &p, store_hooks::Follow::Full, pos)?;
         read_through_copy(self, &p, pos)?;
-        // eval.cc:resolveExprPath follows a symlink on the last component,
-        // so a relative path in the file resolves against the directory of
-        // the target. The `lstat` is what it costs; a path inside a copied
-        // tree keeps `store_hooks`' own resolution.
-        if let Some(local) = at.local()
-            && fs::symlink_metadata(&local).is_ok_and(|m| m.is_symlink())
-            && store_hooks::locate(self, &p).is_none()
-        {
-            for _ in 0..1024 {
-                let Ok(target) = fs::read_link(sys::path_from_internal(&p)) else {
-                    break;
-                };
-                let t = sys::path_to_internal(&target);
-                let joined = if t.starts_with(b"/") {
-                    t
-                } else {
-                    let mut d = dir_of(&p).to_vec();
-                    d.push(b'/');
-                    d.extend_from_slice(&t);
-                    d
-                };
-                p = compile::canon_path(&joined);
+        let is_dir = if host {
+            let meta = fs::symlink_metadata(sys::path_from_internal(&p));
+            let kind = trace::Kind::of(&meta);
+            if kind == trace::Kind::Symlink {
+                let target = follow_import_links(&p);
+                if self.trace().is_on() {
+                    self.trace().record(trace::Obs::ImportPath {
+                        path: p,
+                        target: target.clone(),
+                    });
+                }
+                p = target;
+                store_hooks::open(self, &p, pos)?.is_dir(self)
+            } else {
+                // Replacing a regular file with a link can change the base
+                // of its relative imports even when its contents match.
+                self.trace().stat(&p, false, kind);
+                meta.map(|m| m.is_dir())
             }
-            let full = sys::fs::canonicalize(&local);
-            self.trace()
-                .canon(&sys::path_to_internal(&local), full.ok().as_deref());
-            at = store_hooks::open(self, &p, pos)?;
-        }
-        match at.is_dir(self) {
+        } else {
+            at.is_dir(self)
+        };
+        match is_dir {
             Ok(true) => p.extend_from_slice(b"/default.nix"),
             Ok(false) => {}
             Err(e) => bail!(
@@ -1432,7 +1429,7 @@ impl Evaluator {
     #[inline]
     pub fn maybe_thunk(&mut self, env: &'static EnvObj, ir: IrRef) -> Word {
         match ir {
-            Ir::Const(w) => *w,
+            Ir::Const(w, _) | Ir::LazyConst(w, ConstOrigin::Global(_)) => *w,
             Ir::Local { depth, idx } => {
                 let w = env.local_slot(*depth, *idx).get();
                 // a slot of the env under construction (`let x = x;`): thunk it
@@ -1531,7 +1528,7 @@ impl Evaluator {
     #[inline]
     fn peek(env: &'static EnvObj, ir: IrRef) -> Option<Word> {
         match ir {
-            Ir::Const(w) => Some(*w),
+            Ir::Const(w, _) => Some(*w),
             Ir::Local { depth, idx } => Some(env.try_local_slot(*depth, *idx)?.get()),
             _ => None,
         }
@@ -2205,7 +2202,7 @@ impl Evaluator {
     #[inline(always)]
     fn eval_fast(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         match ir {
-            Ir::Const(w) => return Ok(*w),
+            Ir::Const(w, _) => return Ok(*w),
             Ir::Local { depth, idx } => {
                 let w = env.local_slot(*depth, *idx).get();
                 if !w.is_thunk() {
@@ -2222,7 +2219,13 @@ impl Evaluator {
     /// for its own kind's frame, not for the largest arm's.
     pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         match ir {
-            Ir::Const(w) => Ok(*w),
+            Ir::Const(w, _) => Ok(*w),
+            Ir::LazyConst(_, ConstOrigin::Builtin(sym)) => {
+                // A source selection forces this cell and records its demand.
+                let attr = self.globals.builtins.unwrap().get(*sym).unwrap();
+                self.force_cell(&attr.cell)
+            }
+            Ir::LazyConst(w, _) => self.force(*w),
             Ir::Local { .. } => self.eval_k_local(env, ir),
             Ir::WithVar { .. } => self.eval_k_with_var(env, ir),
             Ir::CurPos(..) => self.eval_k_cur_pos(env, ir),
@@ -3335,7 +3338,9 @@ pub fn ir_pos(ir: &Ir) -> Pos {
         Ir::Lambda(l) => l.pos,
         Ir::Select(s) | Ir::SelectCount(s) => s.pos,
         Ir::Let(l) => ir_pos(l.body),
-        Ir::Const(_) | Ir::Local { .. } | Ir::HasAttr { .. } | Ir::List(_) => Pos::NONE,
+        Ir::Const(..) | Ir::LazyConst(..) | Ir::Local { .. } | Ir::HasAttr { .. } | Ir::List(_) => {
+            Pos::NONE
+        }
     }
 }
 
@@ -3345,6 +3350,28 @@ pub fn dir_of(path: &[u8]) -> &[u8] {
         Some(i) => &path[..i],
         None => b".",
     }
+}
+
+/// eval.cc:resolveExprPath follows links on the final component. Ancestor
+/// spellings survive and are visible to relative paths and source positions.
+pub(crate) fn follow_import_links(path: &[u8]) -> Vec<u8> {
+    let mut path = path.to_vec();
+    for _ in 0..1024 {
+        let Ok(target) = fs::read_link(sys::path_from_internal(&path)) else {
+            break;
+        };
+        let target = sys::path_to_internal(&target);
+        let joined = if target.starts_with(b"/") {
+            target
+        } else {
+            let mut dir = dir_of(&path).to_vec();
+            dir.push(b'/');
+            dir.extend_from_slice(&target);
+            dir
+        };
+        path = compile::canon_path(&joined);
+    }
+    path
 }
 
 impl Evaluator {

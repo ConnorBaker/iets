@@ -125,13 +125,14 @@ did not encounter, the file compiles from source. The compiler visits recursive
 bindings in the current evaluator's symbol order.
 
 The key holds the build id, so a new binary never reads an old entry. It
-also holds everything the compiler folds out of the evaluator's
-configuration, because a folded constant is stored by content: the system,
-the store directory, the compile-time lint levels, and `pure-eval`. Without
-`pure-eval` in the key, an impure run's entry would answer a pure run, and
-`builtins.currentSystem or "fallback"` would give the system. Every other
-constant is stored by name and looked up in the live tables on load, so the
-search path follows the run.
+also holds the system, the store directory, the compile-time lint levels,
+and `pure-eval`. Purity changes which names exist when the compiler folds
+an expression such as `builtins.currentSystem or "fallback"`. The entry
+stores literals by content and folded names by symbol. On load,
+`builtins.nixPath` takes its value from the current evaluator, even if the
+search path was empty when the entry was written. If the rebound value is
+still lazy, as `builtins.currentTime` can be, evaluating that expression
+forces it. Loading the IR leaves it untouched.
 
 `eval-jobs` uses no other cache, so its effect is easy to see. On
 `nixos/release-small.nix` with four workers on a 16-core EPYC:
@@ -169,6 +170,7 @@ Every primop that looks at the world records one observation.
 | a path's kind | `pathExists`, `readFileType`, the `default.nix` probe, every search-path candidate, every marker the SCM detection probed above a flake directory, a fetched store path that the store has as valid | re-stat |
 | a copied tree's NAR hash and stat hash | `./path` coerced to a string, `builtins.path`, `filterSource`, a flake's working tree, a `path:` input | recompute the stat hash with `lstat` only; on a mismatch re-dump the NAR with the recorded filter and compare. A `path:` input also records its newest mtime, which the evaluation sees as `lastModified`, and the same bytes with another date are a change |
 | a resolved symlink | `storePath`, `builtins.path` and `filterSource` when canonicalizing changed the path | canonicalize again |
+| a host import's source path | `import` and `scopedImport` | a regular file's content check uses `lstat` to check the final component too. For a symlink, follow its chain again and compare the path used to resolve relative imports |
 | an environment variable, as a keyed hash | `getEnv`; `HOME` when a `~/` literal is compiled | read it again and hash it again |
 | which query of which SCM was asked in which directory, and its exit status and output | the queries of the SCM that read a flake working tree or a repository; for git, `ls-files`, `status`, `rev-parse HEAD`, `show-ref --head` for a `ref`, and `config core.attributesFile` for `export-ignore` | ask the same query again, rehash |
 
@@ -239,9 +241,10 @@ classic mode the line stays off stderr and the record goes to
 The key is computed from the command *before* evaluation: the build id, the
 subcommand, the expression, or the path of the file or the flake directory,
 the `--arg` pairs, `-A`, `--strict`, `--json`, `--raw`, the lint levels, the
-search path, `builtins.currentSystem`, and the working directory only when a
-relative path literal can reach it. `--workers`, `--builder`, `--timings`
-and `--dry-run` are not in the key: they do not change the answer.
+search path, `builtins.currentSystem`, `builtins.storeDir`, and the working
+directory only when a relative path literal can reach it. `--workers`,
+`--builder`, `--timings` and `--dry-run` are not in the key: they do not
+change the answer.
 
 The key names the file by its path, and the same goes for a flake's
 `flake.nix` and `flake.lock`. They are in the read set like any other file,

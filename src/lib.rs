@@ -48,3 +48,5 @@ pub mod syntax;
 pub mod sys;
 pub mod trace;
 pub mod treestore;
+
+mod varint;

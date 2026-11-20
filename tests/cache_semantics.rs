@@ -9,6 +9,7 @@ use hermetic::{Iets, stderr, stdout};
 use rstest::{fixture, rstest};
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -258,6 +259,63 @@ fn hits_and_misses(work: Work) {
     assert!(r.rc == 0 && r.status.contains("miss ("), "{}", r.status);
 }
 
+#[rstest]
+fn import_starts_following_a_link(work: Work) {
+    let main = work.write(
+        "main.nix",
+        "builtins.seq (builtins.readFile ./entry.nix) (import ./entry.nix)",
+    );
+    let reader = work.write("read.nix", "builtins.readFile ./entry.nix");
+    let src = "import ./value.nix";
+    let entry = work.write("entry.nix", src);
+    work.write("value.nix", "1");
+    work.write("other/entry.nix", src);
+    work.write("other/value.nix", "2");
+
+    assert_eq!(work.eval(&[&main]).out.trim(), "1");
+    assert!(work.eval(&[&main]).status.contains("cache: hit"));
+    touch(946_684_800, &[&entry]);
+    let refreshed = work.eval(&[&main]);
+    assert!(
+        refreshed.status.contains("cache: hit") && refreshed.status.contains(" 1 rehashed"),
+        "{}",
+        refreshed.status
+    );
+    let read = work.eval(&[&reader]).out;
+    fs::remove_file(&entry).unwrap();
+    symlink("other/entry.nix", &entry).unwrap();
+    let r = work.eval(&[&main]);
+    assert_eq!(r.out.trim(), "2");
+    assert!(r.status.contains("cache: miss"), "{}", r.status);
+    assert!(work.eval(&[&main]).status.contains("cache: hit"));
+    // Reading only the bytes still follows the link.
+    let r = work.eval(&[&reader]);
+    assert_eq!(r.out, read);
+    assert!(r.status.contains("cache: hit"), "{}", r.status);
+}
+
+#[rstest]
+fn import_keeps_the_target_directory_spelling(work: Work) {
+    let main = work.write("main.nix", "import ./entry.nix");
+    work.write("source/entry.nix", "baseNameOf (toString ./.)");
+    symlink("source", work.path("alias")).unwrap();
+    symlink("source/entry.nix", work.path("entry.nix")).unwrap();
+    assert_eq!(work.eval(&[&main]).out.trim(), "\"source\"");
+    assert!(work.eval(&[&main]).status.contains("cache: hit"));
+
+    fs::remove_file(work.path("entry.nix")).unwrap();
+    symlink("alias/entry.nix", work.path("entry.nix")).unwrap();
+    let r = work.eval(&[&main]);
+    assert_eq!(r.out.trim(), "\"alias\"");
+    assert!(r.status.contains("cache: miss"), "{}", r.status);
+
+    // An extra hop to the same lexical target preserves the relative base.
+    symlink("alias/entry.nix", work.path("hop")).unwrap();
+    fs::remove_file(work.path("entry.nix")).unwrap();
+    symlink("hop", work.path("entry.nix")).unwrap();
+    assert!(work.eval(&[&main]).status.contains("cache: hit"));
+}
+
 /// `cp -p` in place keeps the size, the mtime and the inode. Only ctime says
 /// the bytes are new.
 #[rstest]
@@ -279,6 +337,75 @@ fn a_copy_in_place_misses(work: Work) {
     assert_eq!(c1.out, "\"AAAA\"");
     assert_eq!(c2.out, "\"BBBB\"");
     assert!(c2.status.contains("miss ("), "{}", c2.status);
+}
+
+#[rstest]
+fn ir_cache_rebinds_nix_path_and_preserves_literal_lists(work: Work) {
+    let file = work.write(
+        "path.nix",
+        "map builtins.length [ builtins.nixPath __nixPath [] (let __nixPath = []; in __nixPath) ]",
+    );
+    let eval = |search: &[&str], event: &str, expected: &str| {
+        let mut cmd = work.iets();
+        cmd.env("IETS_IR_MIN", "0")
+            .env("IETS_IR_STATS", "1")
+            .args(["eval", "--impure", "--json", "--no-tracing-cache"])
+            .args(search)
+            .arg("-f")
+            .arg(&file);
+        let output = hermetic::ok(&mut cmd);
+        let err = stderr(&output);
+        assert!(err.contains(&format!("ir-cache {event} {file} ")), "{err}");
+        assert_eq!(stdout(&output), expected);
+    };
+    eval(&[], "store", "[0,0,0,0]");
+    eval(&["-I", &work.s(".")], "load", "[1,1,0,0]");
+    eval(&[], "load", "[0,0,0,0]");
+}
+
+#[rstest]
+fn an_ir_hit_forces_rebound_lazy_names_only_on_demand(work: Work) {
+    let file = work.write(
+        "src/clock.nix",
+        "{ clock = builtins.currentTime + 7; alias = __currentTime + 7; stable = 3; }",
+    );
+    let eval = |expr: &str, flags: &[&str]| {
+        let mut cmd = work.iets();
+        cmd.env("IETS_IR_MIN", "0")
+            .env("IETS_IR_STATS", "1")
+            .args(["eval", "--impure", "--json", "--timings"])
+            .args(flags)
+            .args(["-E", expr]);
+        let out = hermetic::ok(&mut cmd);
+        (stdout(&out), stderr(&out))
+    };
+    let source = format!("(import {file})");
+    let used = format!("{source}.clock - builtins.currentTime");
+    // The writer already sees currentTime in WHNF when compiling the import.
+    let seed = format!("builtins.seq builtins.currentTime ({used})");
+    assert_eq!(eval(&seed, &["--no-tracing-cache"]).0, "7");
+    assert_eq!(eval(&used, &["--no-ir-cache", "--no-tracing-cache"]).0, "7");
+    let load = format!("ir-cache load {file} ");
+    for _ in 0..2 {
+        let (value, err) = eval(&used, &[]);
+        assert_eq!(value, "7");
+        assert!(err.contains(&load), "{err}");
+        assert!(!err.contains("cache: hit"), "{err}");
+    }
+
+    let alias = format!("{source}.alias - builtins.currentTime");
+    assert_eq!(eval(&alias, &["--no-cache"]).0, "7");
+    let (value, err) = eval(&alias, &["--no-tracing-cache"]);
+    assert_eq!(value, "7");
+    assert!(err.contains(&load), "{err}");
+
+    // Merely decoding the potentially impure name must leave this run cacheable.
+    let stable = format!("{source}.stable");
+    let (value, err) = eval(&stable, &[]);
+    assert_eq!(value, "3");
+    assert!(err.contains(&load), "{err}");
+    let (_, err) = eval(&stable, &[]);
+    assert!(err.contains("cache: hit"), "{err}");
 }
 
 /// The compiled-file cache folds `builtins.currentSystem` into an entry, and
@@ -327,6 +454,22 @@ fn compiling_a_home_path_reports_no_ir_publication(work: Work) {
     assert!(output.status.success(), "{err}");
     assert!(err.contains(&format!("ir-cache compile {file} ")), "{err}");
     assert!(!err.contains("ir-cache store "), "{err}");
+}
+
+#[rstest]
+fn tracing_cache_keys_on_the_resolved_store_directory(work: Work) {
+    let args = ["--raw", "-E", "builtins.storeDir"];
+    for (dir, legacy, expected, status) in [
+        ("/store-a", "", "/store-a", "miss (no entry)"),
+        ("/store-b", "", "/store-b", "miss (no entry)"),
+        ("", "/store-b/", "/store-b", "cache: hit"),
+        ("/store-a", "/store-b", "/store-a", "cache: hit"),
+    ] {
+        let r = work.eval_with(&[("NIX_STORE_DIR", dir), ("NIX_STORE", legacy)], &args);
+        assert_eq!(r.rc, 0);
+        assert_eq!(r.out, expected);
+        assert!(r.status.contains(status), "{}", r.status);
+    }
 }
 
 #[rstest]
