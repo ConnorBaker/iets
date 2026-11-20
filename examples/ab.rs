@@ -407,8 +407,9 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn enable_subreaper() -> io::Result<()> {
-        // An inherited SIG_IGN lets the kernel reap and recycle a checked child PID.
-        // SAFETY: SIG_DFL is a valid disposition for SIGCHLD.
+        check_proc_namespace(Path::new("/proc"), false)?;
+        // An inherited SIG_IGN would let checked child PIDs be recycled.
+        // SAFETY: SIG_DFL is a valid SIGCHLD disposition; this runner is the sole reaper.
         if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
             return Err(io::Error::last_os_error());
         }
@@ -425,9 +426,19 @@ mod ab {
     }
 
     #[cfg(target_os = "linux")]
-    fn check_proc_namespace(procfs: &Path) -> io::Result<()> {
+    fn check_proc_namespace(procfs: &Path, require_proof: bool) -> io::Result<()> {
         let own_pid = process::id().to_string();
-        let status = fs::read(procfs.join("self/status"))?;
+        // Reject a known numeric mismatch even if legacy namespace links are denied.
+        if !require_proof
+            && fs::read_link(procfs.join("self")).is_ok_and(|pid| pid != Path::new(&own_pid))
+        {
+            return Err(io::Error::other("/proc uses a different PID namespace"));
+        }
+        let status = match fs::read(procfs.join("self/status")) {
+            Ok(status) => status,
+            Err(_) if !require_proof => return Ok(()),
+            Err(e) => return Err(e),
+        };
         // An ancestor namespace can assign us the same numeric PID. NStgid
         // lists one PID per namespace from the procfs mount down to our own.
         let same_namespace = match status
@@ -437,6 +448,7 @@ mod ab {
             Some(ids) => ids.trim_ascii() == own_pid.as_bytes(),
             // Before Linux 4.1, compare our namespace to that of PID 1
             // in this mount. Without PID namespaces only the self link exists.
+            None if !require_proof => true,
             None => match fs::read_link(procfs.join("self/ns/pid")) {
                 Ok(ours) => ours == fs::read_link(procfs.join("1/ns/pid"))?,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -470,7 +482,7 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn kill_leftovers_in(procfs: &Path, deadline: Instant) -> io::Result<()> {
-        check_proc_namespace(procfs)?;
+        check_proc_namespace(procfs, true)?;
         // Some kernels omit the per-thread children files, while hidepid can
         // hide a child from the top-level listing. Check both sources.
         let mut result = Ok(());
@@ -1362,6 +1374,36 @@ mod ab {
             // SAFETY: this test is the only test that starts children.
             unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
             enable_subreaper().unwrap();
+            // The shared boundary identifies either binary once for execution
+            // and spawn failures; keep child-spawning assertions in this test.
+            {
+                let root = tempfile::tempdir().unwrap();
+                let false_bin = env::split_paths(&env::var_os("PATH").unwrap())
+                    .map(|dir| dir.join("false"))
+                    .find(|path| path.is_file())
+                    .expect("the false utility");
+                for name in ["before", "after", "missing"] {
+                    let bin = root.path().join(name);
+                    if name != "missing" {
+                        std::os::unix::fs::symlink(&false_bin, &bin).unwrap();
+                    }
+                    let result = run_once(
+                        &bin,
+                        &["eval".into()],
+                        root.path(),
+                        &root.path().join("stderr"),
+                    );
+                    let Err(RunError::Scenario(message)) = result else {
+                        panic!("execution failure lost its scenario classification");
+                    };
+                    let context = format!("{}: ", bin.display());
+                    assert_eq!(message.matches(context.as_str()).count(), 1);
+                    assert!(message.starts_with(&context));
+                    if name != "missing" {
+                        assert!(message.contains("exit status"));
+                    }
+                }
+            }
             assert!(Command::new("true").status().unwrap().success());
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
             let t = Instant::now();
@@ -1395,15 +1437,51 @@ mod ab {
             assert!(reap_after(Duration::ZERO, Duration::ZERO, |_| unreachable!()).unwrap());
             assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
 
-            // A partially failed sweep still leaves the outer reaper responsible for exits.
+            // Exhausting discovery is harmless only once the last child is confirmed gone.
             let mut last = Command::new("sleep").arg("30").spawn().unwrap();
-            let err = reap_after(Duration::ZERO, CLEANUP_GRACE, |_| {
-                last.kill()?;
-                Err(io::Error::from_raw_os_error(libc::EPERM))
-            })
-            .unwrap_err();
-            assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+            assert!(
+                !reap_after(Duration::ZERO, CLEANUP_GRACE, |_| {
+                    last.kill()?;
+                    // Keep the killed exit waitable before simulating expired discovery.
+                    let mut info = MaybeUninit::uninit();
+                    // SAFETY: this test owns last; leave its exit for the outer reaper.
+                    assert_eq!(
+                        unsafe {
+                            libc::waitid(
+                                libc::P_PID,
+                                last.id(),
+                                info.as_mut_ptr(),
+                                libc::WEXITED | libc::WNOWAIT,
+                            )
+                        },
+                        0
+                    );
+                    kill_leftovers(Instant::now())
+                })
+                .unwrap()
+            );
             assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+
+            // Stopping discovery does not excuse a child that is still running.
+            let mut live = Command::new("sleep").arg("30").spawn().unwrap();
+            let result = reap_after(Duration::ZERO, Duration::from_millis(20), |_| {
+                kill_leftovers(Instant::now())
+            });
+            live.kill().unwrap();
+            live.wait().unwrap();
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+
+            // Real errors, including an I/O timeout, survive even after the last exit.
+            for errno in [libc::EPERM, libc::ETIMEDOUT] {
+                let mut last = Command::new("sleep").arg("30").spawn().unwrap();
+                let err = reap_after(Duration::ZERO, CLEANUP_GRACE, |_| {
+                    last.kill()?;
+                    Err(io::Error::from_raw_os_error(errno))
+                })
+                .unwrap_err();
+                assert_eq!(err.raw_os_error(), Some(errno));
+                assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            }
 
             // No optional task children file: discover only the listed owned PID.
             let procfs = tempfile::tempdir().unwrap();
@@ -1442,12 +1520,14 @@ mod ab {
 
             // Reject even coincident numbers from distinct namespaces, as bytes.
             fs::write(&status, format!("NStgid:\t{own}\t{own}\n")).unwrap();
-            assert!(check_proc_namespace(procfs.path()).is_err());
+            assert!(check_proc_namespace(procfs.path(), true).is_err());
             fs::write(&status, b"Name:\tbad-\xff\n").unwrap();
-            assert!(check_proc_namespace(procfs.path()).is_err());
+            assert!(check_proc_namespace(procfs.path(), true).is_err());
             fs::remove_file(&status).unwrap();
             assert_eq!(
-                check_proc_namespace(procfs.path()).unwrap_err().kind(),
+                check_proc_namespace(procfs.path(), true)
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::NotFound
             );
         }
@@ -1906,6 +1986,47 @@ mod ab {
                 io::Error::last_os_error().raw_os_error(),
                 Some(libc::ECHILD)
             );
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn preflight_rejects_known_mismatches_without_requiring_discovery() {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+
+            let procfs = tempfile::tempdir().unwrap();
+            let root = procfs.path();
+            let own = process::id().to_string();
+            fs::create_dir(root.join(&own)).unwrap();
+            symlink(&own, root.join("self")).unwrap();
+            let status = root.join("self/status");
+            fs::write(&status, b"Name:\tlegacy\n").unwrap();
+            check_proc_namespace(root, false).unwrap();
+            // #433 already permits its checked no-namespace-link legacy fallback.
+            check_proc_namespace(root, true).unwrap();
+            fs::write(&status, format!("NStgid:\t{own}\n")).unwrap();
+            check_proc_namespace(root, false).unwrap();
+            check_proc_namespace(root, true).unwrap();
+            fs::write(&status, format!("NStgid:\t{own}\t{own}\n")).unwrap();
+            assert!(check_proc_namespace(root, false).is_err());
+            assert!(check_proc_namespace(root, true).is_err());
+            fs::set_permissions(&status, fs::Permissions::from_mode(0o000)).unwrap();
+            check_proc_namespace(root, false).unwrap();
+            let denied = check_proc_namespace(root, true);
+            fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            fs::remove_file(&status).unwrap();
+            check_proc_namespace(root, false).unwrap();
+            assert_eq!(
+                check_proc_namespace(root, true).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+            fs::remove_file(root.join("self")).unwrap();
+            symlink(
+                (u64::from(process::id()) + 1).to_string(),
+                root.join("self"),
+            )
+            .unwrap();
+            assert!(check_proc_namespace(root, false).is_err());
         }
 
         #[test]
