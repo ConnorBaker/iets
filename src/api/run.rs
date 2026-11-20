@@ -129,12 +129,15 @@ impl Run {
         let store = self.cache.as_ref().map(|c| &c.store);
         let mut cfg = self.cfg.trace_in(store);
         fine::init();
+        let mut workers = self.workers;
         if fine::on() {
+            // Frames and thunk trace IDs belong to the recording thread.
+            workers = 1;
             cfg = cfg.trace(true).ir_cache(None);
         }
         let ev = cfg.build();
         let cache = self.cache;
-        parallel::try_run(self.workers, ev, move |ev| f(ev, cache))
+        parallel::try_run(workers, ev, move |ev| f(ev, cache))
     }
 
     /// [`Run::go`] with the error classified: what this frontend does not
