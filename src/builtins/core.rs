@@ -5,6 +5,7 @@ use crate::compile::ir::ParamIr;
 use crate::eval::{ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::purity;
 use crate::runtime::{Ctx, Value, Word, ctx_to_arena};
+use crate::trace::fine;
 use crate::{log, parallel, print};
 
 pub fn register(r: &mut Registry) {
@@ -32,6 +33,8 @@ pub fn register(r: &mut Registry) {
     r.op("__tryEval", 1, try_eval);
     r.op("__functionArgs", 1, function_args);
     r.op("__unsafeGetAttrPos", 2, unsafe_get_attr_pos);
+    r.op("__fineRoot", 1, fine_root);
+    r.op("__fineQuery", 1, fine_query);
     r.op("__hasContext", 1, has_context);
     r.op(
         "__unsafeDiscardStringContext",
@@ -273,6 +276,7 @@ fn try_eval(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
 }
 
 fn function_args(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    fine::introspection();
     let w = ev.force(args[0])?;
     match w.view() {
         Value::PrimOp(_) | Value::PrimOpApp(_) => Ok(ev.empty_attrs()),
@@ -291,6 +295,7 @@ fn function_args(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word
 }
 
 fn unsafe_get_attr_pos(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    fine::introspection();
     let name = ev.force_string_no_ctx(
         args[0],
         pos,
@@ -417,4 +422,34 @@ fn find_file(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     )?;
     let p = ev.find_file(&entries, name, pos)?;
     Ok(ev.arena.mk_path(&p))
+}
+
+/// `builtins.fineRoot set`: names the cells of `set` as queries for the fine
+/// trace (`trace::fine`), and returns `set`.
+fn fine_root(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
+    let value = ev.force(args[0])?;
+    let Some(a) = value.as_attrs() else {
+        return ev.type_error(
+            "a set",
+            value,
+            pos,
+            "while evaluating the argument passed to builtins.fineRoot",
+        );
+    };
+    fine::root(a);
+    Ok(value)
+}
+
+/// `builtins.fineQuery value`: the fingerprint the fine trace records for
+/// `value`, in hex. The elements of a list are forced first, as the reader
+/// of a list of scalars forced them; one that fails stays unforced.
+fn fine_query(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> {
+    let v = ev.force(args[0])?;
+    if let Some(l) = v.as_list() {
+        for c in l.cells() {
+            let _ = ev.force_cell(c);
+        }
+    }
+    let fp = fine::fingerprint_hex(&ev.interner, v);
+    Ok(ev.mk_string(fp.as_bytes()))
 }

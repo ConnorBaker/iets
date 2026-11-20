@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::thread::Builder;
 
-use crate::api::MAIN_STACK;
+use crate::api::{MAIN_STACK, run};
 use crate::cli::{self, help};
 use crate::env::Env;
 use crate::session::{self, Exit, Session, exit};
@@ -113,6 +113,9 @@ fn command(argv: Vec<String>, classic: Option<String>) -> i32 {
         return 2;
     };
     let mut rest: Vec<String> = argv[1..].to_vec();
+    if let Some(code) = run::fine_command(cmd, &rest) {
+        return code;
+    }
     help::set_command("iets");
     let cmd = match cmd.as_str() {
         "cache-dump" => {

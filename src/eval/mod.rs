@@ -22,8 +22,8 @@ use crate::builtins::derivation::DrvState;
 use crate::builtins::{self, store_hooks};
 use crate::compile::cache::{self, IrCache};
 use crate::compile::ir::{
-    AttrElemIr, AttrsIr, BindIr, BindScope, ConstOrigin, Ir, IrRef, LambdaIr, LetIr, ParamIr,
-    SelectIr,
+    AttrElemIr, AttrsIr, BindIr, BindScope, ConstOrigin, Ir, IrRef, LambdaIr, LetIr, NO_LIT,
+    ParamIr, SelectIr,
 };
 use crate::compile::{self, Compiler, Globals};
 use crate::events::{self, Field, Group};
@@ -47,7 +47,7 @@ use crate::store::path::{StorePath, split_store_path, store_dir};
 use crate::store::source::{SourceOrigin, SrcPath};
 use crate::syntax::ast::{Ast, FileId};
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
-use crate::trace::{self, Trace, store};
+use crate::trace::{self, Trace, fine, store};
 use crate::{argv, config, parallel, syntax};
 
 pub const MAX_CALL_DEPTH: u32 = 10000;
@@ -983,6 +983,7 @@ impl Evaluator {
             base_dir,
             lints,
         );
+        c.fine = origin == Origin::File && fine::on();
         let r = c.compile_root(extra_scope);
         let used_home = c.used_home.get();
         let cacheable = !used_home && !c.diags_depend_on_symbol_order;
@@ -1003,6 +1004,9 @@ impl Evaluator {
         let ir = r?;
         if self.prof.on() {
             self.session.profile.note_ir(ir);
+        }
+        if origin == Origin::File && fine::on() {
+            fine::compiled(self, path, ir, base);
         }
         self.report_diags(&diags);
         // Recursive bindings and formal defaults compile in symbol order.
@@ -1141,6 +1145,11 @@ impl Evaluator {
         path: &[u8],
         pos: Pos,
     ) -> EvalResult<Word> {
+        // Standalone region fingerprints compile without the lexical bindings
+        // introduced by scopedImport, which may shadow global primitives.
+        if fine::on() {
+            fine::volatile();
+        }
         let resolved = self.resolve_import_path(path, pos)?;
         let src = self.read_source(&resolved, pos)?;
         let names: Vec<Sym> = scope.iter().map(|a| a.sym).collect();
@@ -1264,7 +1273,15 @@ impl Evaluator {
         {
             return Ok(src.to_vec());
         }
-        match store_hooks::resolve(self, resolved).read(self, false) {
+        let fine = fine::on();
+        if fine {
+            fine::set_importing(true);
+        }
+        let r = store_hooks::resolve(self, resolved).read(self, false);
+        if fine {
+            fine::set_importing(false);
+        }
+        match r {
             Ok(s) => Ok(s),
             Err((_, e)) => bail!(
                 ErrorKind::Io,
@@ -1298,7 +1315,7 @@ impl Evaluator {
         let v = self.force_thunk(w)?;
         // Nested equality observes the identity of the slot that produced a
         // function. Its thunk already memoizes the result of forcing it.
-        if self.par.is_main && !v.is_function() {
+        if self.par.is_main && !v.is_function() && !fine::on() {
             cell.set(v);
         }
         Ok(v)
@@ -1318,9 +1335,18 @@ impl Evaluator {
             );
         }
         if !w.thunk_unforced(st) {
+            if st.is_traced() {
+                fine::read(&self.interner, w, st, w.thunk_value(st));
+            } else if fine::on() && w.thunk_holds_value(st) {
+                fine::volatile();
+            }
             return Ok(w.thunk_value(st));
         }
         if let Some(index) = st.failed_index() {
+            // The saved exception does not carry the dependencies of its force.
+            if fine::on() {
+                fine::volatile();
+            }
             return Err(self.session.failed_thunks.rethrow(index));
         }
         state.set(Word::BLACKHOLE);
@@ -1334,15 +1360,22 @@ impl Evaluator {
             }] += 1;
             self.arena.stats.census.note_thunk_forced(w.bits());
         }
+        let traced = fine::push();
         let v = self.run_thunk(w, st);
         match v {
             Ok(v) => {
                 debug_assert!(!v.is_thunk());
-                let done = w.thunk_finish(v, true);
+                let mut done = w.thunk_finish(v, true);
+                if traced {
+                    done = fine::finish(&self.interner, w, v, done);
+                }
                 state.set(done);
                 Ok(v)
             }
             Err(mut e) => {
+                if traced {
+                    fine::pop_failed();
+                }
                 state.set(self.failed_thunk_state(st, &mut e));
                 Err(e)
             }
@@ -1795,6 +1828,9 @@ impl Evaluator {
         }
         let (line, col) = f.line_col(off);
         let path = f.path.clone();
+        if fine::on() {
+            fine::position(&path, off);
+        }
         let file = self.mk_string(&path);
         let line = self.mk_int(line as i64);
         let col = self.mk_int(col as i64);
@@ -1889,6 +1925,7 @@ impl Evaluator {
         let mut args = args;
         let mut functors = 0u32;
         while !args.is_empty() {
+            fine::apply(cur);
             match cur.view() {
                 Value::Lambda(l) => {
                     let (mut fenv, mut lam) = (l.env, l.lam);
@@ -1975,6 +2012,7 @@ impl Evaluator {
                     } else {
                         0
                     };
+                    fine::at(pos.0, &self.prof);
                     cur = (op.f)(self, &args[..arity], pos).map_err(|mut e| {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
@@ -2001,6 +2039,7 @@ impl Evaluator {
                     } else {
                         0
                     };
+                    fine::at(pos.0, &self.prof);
                     cur = (op.f)(self, &all[..arity], pos).map_err(|mut e| {
                         e.add_trace(pos, format!("while calling the '{}' builtin", op.name));
                         e
@@ -2219,6 +2258,10 @@ impl Evaluator {
     /// for its own kind's frame, not for the largest arm's.
     pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         match ir {
+            Ir::Region { id, body } => {
+                fine::enter(*id);
+                self.eval(env, body)
+            }
             Ir::Const(w, _) => Ok(*w),
             Ir::LazyConst(_, ConstOrigin::Builtin(sym)) => {
                 // A source selection forces this cell and records its demand.
@@ -2616,7 +2659,9 @@ impl Evaluator {
                 pos,
                 "while evaluating the first subexpression of a with expression",
             )?;
-            e.slot(0).set(Word::from_ref(attrs));
+            if !fine::on() {
+                e.slot(0).set(Word::from_ref(attrs));
+            }
             if let Some(a) = attrs.get(sym) {
                 return self.force_cell(&a.cell);
             }
@@ -2942,6 +2987,9 @@ impl Evaluator {
                 out.init(i, b.sym, b.pos, w);
             }
         }
+        if a.lit != NO_LIT {
+            fine::lit(out, a.lit);
+        }
         Word::from_ref(out)
     }
 
@@ -3120,7 +3168,7 @@ impl Evaluator {
         if b.is_empty() {
             return Word::from_ref(a);
         }
-        let a_small = a.kind == Kind::Attrs && a.len() < UNION_MIN;
+        let a_small = a.kind == Kind::Attrs && a.len_quiet() < UNION_MIN;
         if !a_small {
             let a = if leaf_count(a) + leaf_count(b) > MAX_LEAVES as usize {
                 self.arena.flat(a)
@@ -3128,13 +3176,17 @@ impl Evaluator {
                 a
             };
             if leaf_count(a) + leaf_count(b) <= MAX_LEAVES as usize {
-                return self.arena.alloc_union(a, b);
+                let u = self.arena.alloc_union(a, b);
+                if let Some(o) = u.as_attrs() {
+                    fine::union(o, a, b);
+                }
+                return u;
             }
         }
-        let (aa, bb) = (
-            self.arena.flat(a).attrs_raw(),
-            self.arena.flat(b).attrs_raw(),
-        );
+        let (fa, fb) = (self.arena.flat(a), self.arena.flat(b));
+        fine::spread(fa);
+        fine::spread(fb);
+        let (aa, bb) = (fa.attrs_raw(), fb.attrs_raw());
         let (mut i, mut j, mut common) = (0, 0, 0);
         while i < aa.len() && j < bb.len() {
             match aa[i].sym.cmp(&bb[j].sym) {
@@ -3177,6 +3229,7 @@ impl Evaluator {
             out.init_from(k, x);
             k += 1;
         }
+        fine::union(out, a, b);
         Word::from_ref(out)
     }
 
@@ -3338,6 +3391,7 @@ pub fn ir_pos(ir: &Ir) -> Pos {
         Ir::Lambda(l) => l.pos,
         Ir::Select(s) | Ir::SelectCount(s) => s.pos,
         Ir::Let(l) => ir_pos(l.body),
+        Ir::Region { body, .. } => ir_pos(body),
         Ir::Const(..) | Ir::LazyConst(..) | Ir::Local { .. } | Ir::HasAttr { .. } | Ir::List(_) => {
             Pos::NONE
         }

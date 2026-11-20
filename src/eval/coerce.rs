@@ -3,10 +3,11 @@
 
 use std::borrow::Cow;
 
-use super::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
+use super::{Error, ErrorKind, EvalResult, Evaluator, NIX_STATIC_SYMBOLS, Pos, bail};
 use crate::builtins::store_hooks;
 use crate::lint::{LintId, coerce};
 use crate::runtime::{Cell, Ctx, Taint, Value, ValueType, Word};
+use crate::trace::fine;
 
 impl Evaluator {
     /// Coerce a value to a string, collecting context into `ctx`.
@@ -183,7 +184,24 @@ impl Evaluator {
             );
         }
         coerce::store_path_recopy(self, path, pos)?;
-        store_hooks::copy_path_to_store(self, path, pos)
+        if !fine::on() {
+            return store_hooks::copy_path_to_store(self, path, pos);
+        }
+        // a copy is cached, so a later reader takes the trace of the first
+        if self.src_to_store.get(path).is_some() {
+            fine::edge(fine::copy_trace(path));
+            return store_hooks::copy_path_to_store(self, path, pos);
+        }
+        fine::push();
+        let r = store_hooks::copy_path_to_store(self, path, pos);
+        match r {
+            Ok(_) => {
+                let t = fine::pop();
+                fine::set_copy_trace(path, t);
+            }
+            Err(_) => fine::pop_failed(),
+        }
+        r
     }
 
     /// The `==` operator. Nix compares two fresh operand temporaries
@@ -251,6 +269,8 @@ impl Evaluator {
                 Ok(true)
             }
             (Value::Attrs(x), Value::Attrs(y)) => {
+                fine::compared(x);
+                fine::compared(y);
                 if self.is_derivation(a)? && self.is_derivation(b)? {
                     let i = x.get(self.s.out_path);
                     let j = y.get(self.s.out_path);
@@ -258,10 +278,23 @@ impl Evaluator {
                         return self.eq_cells(&i.cell, &j.cell, pos);
                     }
                 }
-                if x.len() != y.len() {
+                let len = x.len();
+                if len != y.len() {
                     return Ok(false);
                 }
-                for (ax, ay) in x.iter().zip(y.iter()) {
+                // A mismatch while either side still has a preallocated Nix
+                // symbol cannot depend on how later names were interned.
+                let mut check_order = fine::on() && len > 1;
+                for (i, (ax, ay)) in x.iter().zip(y.iter()).enumerate() {
+                    if check_order
+                        && ax.sym.0 as usize >= NIX_STATIC_SYMBOLS.len()
+                        && ay.sym.0 as usize >= NIX_STATIC_SYMBOLS.len()
+                    {
+                        if i + 1 < len {
+                            fine::attr_order(x, y, NIX_STATIC_SYMBOLS.len());
+                        }
+                        check_order = false;
+                    }
                     if ax.sym != ay.sym || !self.eq_cells(&ax.cell, &ay.cell, pos)? {
                         return Ok(false);
                     }

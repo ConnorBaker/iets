@@ -8,6 +8,7 @@ use crate::runtime::Word;
 use crate::runtime::arena::Stat;
 use crate::runtime::value::{Attr, for_each_leaf};
 use crate::syntax::symbol::{FxHashMap, FxHashSet, Sym};
+use crate::trace::fine;
 use crate::{parallel, print};
 
 pub fn register(r: &mut Registry) {
@@ -100,6 +101,34 @@ fn remove_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
     if l.len == 0 {
         return Ok(Word::from_ref(a));
     }
+    let force_name = |ev: &mut Evaluator, w| {
+        ev.force_sym(
+            w,
+            pos,
+            "while evaluating the values of the second argument passed to builtins.removeAttrs",
+        )
+    };
+    if fine::on() {
+        // An absent name is still excluded if it appears in a later revision.
+        let mut names = l
+            .cells()
+            .iter()
+            .map(|c| force_name(ev, c.get()))
+            .collect::<EvalResult<Vec<_>>>()?;
+        names.sort_unstable();
+        names.dedup();
+        let kept: Vec<_> = a
+            .iter_quiet()
+            .filter(|at| names.binary_search(&at.sym).is_err())
+            .collect();
+        // Provenance belongs to this result, including when it is empty.
+        let out = ev.arena.alloc_attrs_as(kept.len(), Stat::AttrsRemove);
+        for (i, at) in kept.into_iter().enumerate() {
+            out.init(i, at.sym, at.pos, at.cell.get());
+        }
+        fine::removed(out, a, &names);
+        return Ok(Word::from_ref(out));
+    }
     // Each name is looked up in the set and its entry marked: sorting the
     // names took half the builtin on long lists.
     let flat = ev.arena.flat(a);
@@ -107,11 +136,7 @@ fn remove_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word>
     let mut marks = Bits::new(src.len());
     let mut removed = 0;
     for c in l.cells() {
-        let name = ev.force_sym(
-            c.get(),
-            pos,
-            "while evaluating the values of the second argument passed to builtins.removeAttrs",
-        )?;
+        let name = force_name(ev, c.get())?;
         let Some(at) = flat.get(name) else {
             continue;
         };
@@ -156,7 +181,7 @@ fn intersect_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wo
     } else if r.1 <= l.0 {
         false
     } else {
-        left.len() < right.len()
+        left.len_quiet() < right.len_quiet()
     };
     let (small, big) = if left_small {
         (left, right)
@@ -164,7 +189,8 @@ fn intersect_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wo
         (right, left)
     };
     let mut out: Vec<(Sym, Pos, Word)> = Vec::with_capacity(small.len_bounds().1);
-    if small.len_bounds().1 < 32 {
+    // Individual lookups record both hits and misses on the larger set.
+    if small.len_bounds().1 < 32 || fine::on() {
         for k in small.iter() {
             if let Some(b) = big.get(k.sym) {
                 let r = if left_small { b } else { k };
@@ -221,17 +247,19 @@ fn map_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     )?;
     let f = args[0];
     let a = ev.arena.flat(a);
-    if a.len() <= Word::MAP_MAX_IDX + 1 {
+    // a map word's value lands in the set's cell, past the trace of its force
+    if a.len_quiet() <= Word::MAP_MAX_IDX + 1 && !fine::on() {
         // one map word per entry, no thunk object (docs/explanation/evaluation.md)
         return Ok(ev.arena.mk_map_attrs(f, a));
     }
-    let mut out: Vec<(Sym, Pos, Word)> = Vec::with_capacity(a.len());
-    for attr in a.iter() {
+    let out = ev.arena.alloc_attrs_as(a.len_quiet(), Stat::AttrsMap);
+    for (i, attr) in a.iter_quiet().enumerate() {
         let name = ev.sym_string(attr.sym);
         let v = ev.arena.mk_thunk_app2(f, name, attr.cell.get());
-        out.push((attr.sym, Pos::NONE, v));
+        out.init(i, attr.sym, Pos::NONE, v);
     }
-    Ok(ev.arena.mk_attrs_sorted_as(&out, Stat::AttrsMap))
+    fine::same(out, a);
+    Ok(Word::from_ref(out))
 }
 
 fn list_to_attrs(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {

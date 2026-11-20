@@ -9,9 +9,10 @@ use hermetic::{Iets, stderr, stdout};
 use rstest::{fixture, rstest};
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
@@ -81,6 +82,28 @@ impl Work {
             .args(args);
         run(c)
     }
+
+    fn trace_jobs(&self, mode: &str, expr: &str) -> Output {
+        let file = self.write("root.nix", expr);
+        let jobs = self.path("jobs");
+        fs::create_dir(&jobs).unwrap();
+        self.iets()
+            .env("IETS_FINE_TRACE", "")
+            .env("IETS_FINE_DAG", self.path("dag"))
+            .env("IETS_FINE_JOBS", jobs)
+            .args([
+                "eval",
+                "--no-tracing-cache",
+                "--no-ir-cache",
+                "--workers",
+                "1",
+                mode,
+                "-f",
+                &file,
+            ])
+            .output()
+            .unwrap()
+    }
 }
 
 fn run(mut c: Command) -> Run {
@@ -93,6 +116,24 @@ fn run(mut c: Command) -> Run {
         status: lines("cache:").join(" "),
         why: lines("re-evaluating:").join(" "),
     }
+}
+
+#[rstest]
+fn fine_root_returns_the_forced_set(work: Work) {
+    let result = work.eval_with(
+        &[("IETS_FINE_TRACE", "")],
+        &[
+            "--workers",
+            "1",
+            "--no-tracing-cache",
+            "--no-ir-cache",
+            "--raw",
+            "-E",
+            r#"let s = { a = throw "unused"; }; in builtins.typeOf (builtins.fineRoot s)"#,
+        ],
+    );
+    assert_eq!(result.rc, 0);
+    assert_eq!(result.out, "set");
 }
 
 /// Sets the mtime of `files` to `secs` after the epoch. BSD touch has no
@@ -883,4 +924,215 @@ fn folded_builtin_selections_bind_their_fallback(work: Work) {
     let out = eval(r#"builtins.true or (throw "unreachable")"#);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "true");
+}
+
+#[rstest]
+fn fine_cutoffs_preserve_introspection(work: Work) {
+    let switch = work.write("switch.nix", "true");
+    work.write(
+        "pkgs.nix",
+        "{ source = if import ./switch.nix then { k=1; f={x ? 1}: x; } else {\n\nk=1; f={y ? 2}: y; }; number = if import ./switch.nix then 7 else 7; }",
+    );
+    let expr = work.write(
+        "root.nix",
+        r#"let
+          p = import ./pkgs.nix;
+          formals = builtins.functionArgs p.source.f;
+          loc = builtins.unsafeGetAttrPos "k" (removeAttrs p.source [ "f" ]);
+          root = builtins.foldl' (v: i: if i == 0 then p else builtins.fineRoot v) null [ 0 1 ];
+        in builtins.seq root [
+          (formals ? x)
+          (formals ? x)
+          (loc.line)
+          (p.source ? k)
+          ((builtins.functionArgs ({z}: z)) ? z)
+          (((builtins.functionArgs ({z}: z)) ? z) && p.number == 7)
+        ]"#,
+    );
+    let projection = work.write(
+        "projection.nix",
+        "builtins.fineQuery (import ./pkgs.nix).source",
+    );
+    let graph = work.path("dag");
+    let eval = |expr: &str, record| {
+        let mut c = work.iets();
+        c.env("IETS_FINE_TRACE", "")
+            .args(["eval", "--strict", "--no-cache", "--workers", "1"])
+            .arg(expr);
+        if record {
+            c.env("IETS_FINE_DAG", &graph);
+        }
+        stdout(&hermetic::ok(&mut c))
+    };
+    assert_eq!(eval(&expr, true), "[ true true 1 true true true ]");
+    let fingerprint = eval(&projection, false);
+    work.write("switch.nix", "false");
+    assert_eq!(eval(&expr, false), "[ false false 3 true true true ]");
+    assert_eq!(eval(&projection, false), fingerprint);
+
+    work.write("changes", &format!("1\tV\t2\n1\tCR\t{switch}\t\n"));
+    let check = || {
+        let mut server = work
+            .iets()
+            .current_dir(work.dir.path())
+            .args(["fine-check", "--serve"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        server
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"load dag 0\ncheck changes report\n")
+            .unwrap();
+        let result = server.wait_with_output().unwrap();
+        assert!(result.status.success());
+        assert_eq!(stdout(&result), "ok\nok");
+        fs::read_to_string(work.path("report")).unwrap()
+    };
+    let report = check();
+    let lines: Vec<_> = report.lines().collect();
+    assert_eq!(&lines[..3], ["H\tdag\t0", "H\tdag\t1", "H\tdag\t2"]);
+    assert_eq!(lines.len(), 7);
+    for (job, name) in [(3, "source"), (5, "number")] {
+        let status = format!("S\tdag\t{job}\t");
+        let key = lines.iter().find_map(|l| l.strip_prefix(&status)).unwrap();
+        assert!(lines.iter().any(|l|
+            l.starts_with(&format!("Q\t{key}\t")) && l.ends_with(&format!("\t{name}"))
+        ));
+    }
+
+    // An older recorder had no marker or scalar query kind.
+    let obs = fs::read_to_string(graph.join("obs")).unwrap();
+    fs::write(graph.join("obs"), obs.replace("M\n", "_\n")).unwrap();
+    let queries = fs::read_to_string(graph.join("queries")).unwrap();
+    let mut old = String::new();
+    for line in queries.lines() {
+        let mut fields: Vec<_> = line.split('\t').collect();
+        if fields[6] == "5" {
+            fields[6] = "1";
+        }
+        old.push_str(&fields.join("\t"));
+        old.push('\n');
+    }
+    fs::write(graph.join("queries"), old).unwrap();
+    assert_eq!(
+        check(),
+        "H\tdag\t0\nH\tdag\t1\nH\tdag\t2\nH\tdag\t3\nH\tdag\t5\n"
+    );
+}
+
+#[rstest]
+#[case::text("--strict", "[ { result = import ./a.nix; } 42 ]", "[ { result = 1; } 42 ]\n", &[0], &[0])]
+#[case::json(
+    "--json",
+    r#"[ { result = import ./a.nix; } { outPath = import ./b.nix; unused = throw "unused"; }
+         { __toString = self: import ./b.nix; } [ { nested = import ./a.nix; } ] 42 ]"#,
+    "[{\"result\":1},\"b\",\"b\",[{\"nested\":1}],42]\n",
+    &[0, 3],
+    &[1, 2]
+)]
+fn nested_job_output(
+    work: Work,
+    #[case] mode: &str,
+    #[case] expr: &str,
+    #[case] expected: &str,
+    #[case] a_jobs: &[usize],
+    #[case] b_jobs: &[usize],
+) {
+    let a = work.write("a.nix", "1");
+    let b = work.write("b.nix", r#""b""#);
+    let dag = work.s("dag");
+    let eval = work.trace_jobs(mode, expr);
+    assert!(eval.status.success(), "{}", stderr(&eval));
+    assert_eq!(eval.stdout, expected.as_bytes());
+
+    for (file, jobs) in [(&a, a_jobs), (&b, b_jobs)] {
+        let changes = work.write("changes", &format!("1\tV\t2\n1\tCR\t{file}\t\n"));
+        let check = work
+            .iets()
+            .args(["fine-check", &changes, &dag])
+            .output()
+            .unwrap();
+        assert!(check.status.success(), "{}", stderr(&check));
+        let expected: String = jobs.iter().map(|i| format!("{dag}\t{i}\t1\n")).collect();
+        assert_eq!(check.stdout, expected.as_bytes());
+    }
+    let obs = work.path("dag/obs");
+    let records = fs::read_to_string(&obs).unwrap();
+    fs::write(obs, records.replace("V\tjob-trace-cumulative-v2\n", "")).unwrap();
+    let stale = work
+        .iets()
+        .args(["fine-check", &work.s("changes"), &dag])
+        .output()
+        .unwrap();
+    assert!(!stale.status.success());
+    assert!(stderr(&stale).contains("regenerate"), "{}", stderr(&stale));
+}
+
+#[rstest]
+fn json_jobs_share_a_path_copy_trace(work: Work) {
+    work.write("payload/file", "hello");
+    let run = work.trace_jobs("--json", "[ ./payload { nested = ./payload; } 42 ]");
+    assert!(run.status.success(), "{}", stderr(&run));
+    for i in 0..3 {
+        let trace = fs::read_to_string(work.path(&format!("jobs/{i}"))).unwrap();
+        assert!(trace.ends_with("V\tjob-trace-cumulative-v2\n"), "{trace}");
+    }
+    let output: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert!(output[0].as_str().unwrap().ends_with("-payload"));
+    assert_eq!(output[0], output[1]["nested"]);
+    work.write(
+        "changes",
+        &format!("1\tV\t2\n1\tCT\t{}\n", work.s("payload")),
+    );
+    let commands = work.write("server", "load dag 0\ncheck changes checked\n");
+    let server = work
+        .iets()
+        .current_dir(work.dir.path())
+        .args(["fine-check", "--serve"])
+        .stdin(fs::File::open(commands).unwrap())
+        .output()
+        .unwrap();
+    assert!(server.status.success(), "{}", stderr(&server));
+    assert_eq!(server.stdout, b"ok\nok\n");
+    assert_eq!(
+        fs::read_to_string(work.path("checked")).unwrap(),
+        "H\tdag\t0\nH\tdag\t1\n"
+    );
+}
+
+#[rstest]
+fn fine_regions_follow_compiled_slot_names(work: Work) {
+    let seed = work.write("seed.nix", "{ zz=0; yy=0; bb=0; aa=0; }");
+    let file = work.write("slots.nix", "");
+    let read = |seed_first: bool| {
+        let mut cmd = work.iets();
+        cmd.arg("fine-regions");
+        if seed_first {
+            cmd.arg(&seed);
+        }
+        let output = stdout(&hermetic::ok(cmd.arg(&file)));
+        output
+            .lines()
+            .find(|row| row.starts_with(&format!("R\t{file}\t\t")))
+            .unwrap()
+            .to_string()
+    };
+    let write = |tail: &str| {
+        work.write(
+            "slots.nix",
+            &format!("outer: {{ aa, bb }}: let inherit aa; yy = aa; zz = bb; in unused: [ outer yy zz {tail} ]"),
+        );
+    };
+    write("[] {} builtins.nixPath");
+    let hash = read(false);
+    assert_eq!(hash, read(true));
+    write("[] {} []");
+    assert_ne!(hash, read(false));
+    write("[] {} yy");
+    let local = read(false);
+    write("[] {} zz");
+    assert_ne!(local, read(false));
 }

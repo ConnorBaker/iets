@@ -2,6 +2,7 @@
 //! validation against the file system, and the on-disk entry. Design:
 //! docs/explanation/caching.md.
 
+pub mod fine;
 pub mod key;
 pub mod run;
 pub mod store;
@@ -376,12 +377,18 @@ impl Trace {
     }
 
     pub fn record(&self, o: Obs) {
+        if fine::on() {
+            fine::outside(&o);
+        }
         if let Some(i) = &self.0 {
             i.obs.lock().unwrap().push(o);
         }
     }
 
     pub fn mark_uncacheable(&self) {
+        if fine::on() {
+            fine::volatile();
+        }
         if let Some(i) = &self.0 {
             i.uncacheable.store(true, Ordering::Relaxed);
         }
@@ -424,7 +431,10 @@ impl Trace {
 
     /// A regular file whose bytes are in memory.
     pub fn file(&self, path: &[u8], meta: &fs::Metadata, bytes: &[u8]) {
-        if self.is_on() {
+        if fine::importing() {
+            // A region stands for the imported bytes but keeps their spelling.
+            fine::import_file(&sys::from_native(path));
+        } else if self.is_on() {
             self.record(file_obs(&sys::from_native(path), meta, sha256(bytes)));
         }
     }

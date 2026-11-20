@@ -12,9 +12,11 @@ use super::word::{
 use crate::compile::ir::{Ir, LambdaIr};
 use crate::eval::{self, Evaluator, Pos};
 use crate::syntax::symbol::{self, Sym};
+use crate::trace::fine;
+use std::panic::Location;
 #[cfg(feature = "stats2")]
-use std::sync::atomic::{AtomicPtr, AtomicU8};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::{ptr, slice};
 
 /// Most contents the `strings` table records: the capacity of 2^20 buckets,
@@ -218,7 +220,7 @@ pub struct Attr {
     pub cell: Cell,
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct AttrsObj {
     /// `Kind::Attrs`: `len` entries follow. `Kind::AttrsUnion`: a
     /// `UnionTail` follows and the entries are those of `b` over `a`.
@@ -229,8 +231,7 @@ pub struct AttrsObj {
     /// bit 7 once the entries were iterated.
     #[cfg(feature = "stats2")]
     pub flags: AtomicU8,
-    #[cfg(not(feature = "stats2"))]
-    pub flags: u8,
+    fine_flags: AtomicU8,
     /// Flat slices an iteration merges: 1 for a flat set.
     pub leaves: u8,
     /// Entry count; `u32::MAX` on a union whose count was not needed yet.
@@ -390,7 +391,7 @@ impl MapDesc {
 }
 
 const _: () = assert!(size_of::<ListObj>() == 8);
-const _: () = assert!(size_of::<AttrsObj>() == 8);
+const _: () = assert!(size_of::<AttrsObj>() == if cfg!(feature = "stats2") { 16 } else { 8 });
 const _: () = assert!(size_of::<EnvObj>() == 8);
 const _: () = assert!(size_of::<Attr>() == 16);
 const _: () = assert!(size_of::<ThunkObj>() == 16);
@@ -430,6 +431,11 @@ impl ListObj {
 }
 
 impl AttrsObj {
+    #[inline]
+    pub(crate) fn fine_flags(&self) -> u8 {
+        self.fine_flags.load(Ordering::Relaxed)
+    }
+
     fn flat_bytes(entries: usize) -> usize {
         size_of::<Self>() + entries * size_of::<Attr>()
     }
@@ -451,10 +457,20 @@ impl AttrsObj {
     /// The entries as one sorted slice. A union must have been flattened
     /// (`Arena::flat`) by the caller; iteration without a copy is `iter()`.
     #[inline]
+    #[track_caller]
     pub(crate) fn attrs(&self) -> &'static [Attr] {
         #[cfg(feature = "stats2")]
         self.flags.fetch_or(0x80, Ordering::Relaxed);
+        if self.fine_flags() & fine::FLAG != 0 {
+            fine::all(self, Location::caller());
+        }
+        fine::spread(self);
         self.attrs_raw()
+    }
+
+    /// Sets a flag bit the fine trace owns.
+    pub(crate) fn mark(&self, f: u8) {
+        self.fine_flags.fetch_or(f, Ordering::Relaxed);
     }
 
     #[inline]
@@ -513,12 +529,27 @@ impl AttrsObj {
     }
 
     #[inline]
+    #[track_caller]
     pub(crate) fn len(&self) -> usize {
+        if self.fine_flags() & fine::FLAG != 0 {
+            fine::all(self, Location::caller());
+        }
+        #[cfg(feature = "stats2")]
+        if self.len_raw() == u32::MAX {
+            self.flags.fetch_or(0x80, Ordering::Relaxed);
+        }
+        self.len_quiet()
+    }
+
+    /// `len` for a caller whose answer does not depend on it, such as a
+    /// capacity: the fine trace records no read of the whole set.
+    #[inline]
+    pub(crate) fn len_quiet(&self) -> usize {
         let n = self.len_raw();
         if n != u32::MAX {
             return n as usize;
         }
-        let n = self.iter().count();
+        let n = self.iter_raw().count();
         self.len.store(n as u32, Ordering::Relaxed);
         n
     }
@@ -542,13 +573,7 @@ impl AttrsObj {
     /// `len` for the census, which must not count as a use.
     #[cfg(feature = "stats2")]
     pub(crate) fn len_unmarked(&self) -> usize {
-        let n = self.len_raw();
-        if n != u32::MAX {
-            return n as usize;
-        }
-        let n = self.iter_raw().count();
-        self.len.store(n as u32, Ordering::Relaxed);
-        n
+        self.len_quiet()
     }
 
     #[inline]
@@ -568,6 +593,20 @@ impl AttrsObj {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |f| {
                 Some(if f & 0x7f < 0x7f { f + 1 } else { f })
             });
+        if self.fine_flags() & fine::FLAG != 0 {
+            fine::get(self, sym);
+        }
+        let r = self.lookup(sym);
+        if self.fine_flags() & fine::TAGGED != 0
+            && let Some(a) = r
+        {
+            fine::select(self, a);
+        }
+        r
+    }
+
+    #[inline]
+    fn lookup(&self, sym: Sym) -> Option<&'static Attr> {
         if self.kind == Kind::Attrs {
             #[cfg(feature = "stats2")]
             census::note_get(0, 0);
@@ -581,7 +620,13 @@ impl AttrsObj {
         let mut leaves = self.leaf_sets().iter().rev();
         #[cfg(feature = "stats2")]
         let count = leaves.len();
-        let hit = leaves.find_map(|leaf| leaf.get_flat(sym));
+        let hit = leaves.find_map(|leaf| {
+            let a = leaf.get_flat(sym)?;
+            if leaf.fine_flags() & fine::TAGGED != 0 {
+                fine::select(leaf, a);
+            }
+            Some(a)
+        });
         #[cfg(feature = "stats2")]
         census::note_get(
             if hit.is_some() { 2 } else { 4 },
@@ -605,13 +650,25 @@ impl AttrsObj {
 
     /// The entries in sym order, merging a union's leaves on the fly.
     #[inline]
+    #[track_caller]
     pub(crate) fn iter(&self) -> AttrIter {
         #[cfg(feature = "stats2")]
         self.flags.fetch_or(0x80, Ordering::Relaxed);
+        if self.fine_flags() & fine::FLAG != 0 {
+            fine::all(self, Location::caller());
+        }
+        self.iter_quiet()
+    }
+
+    /// `iter` for a set built from this one that keeps its provenance:
+    /// the fine trace records no read of the whole set.
+    #[inline]
+    pub(crate) fn iter_quiet(&self) -> AttrIter {
+        fine::spread(self);
         self.iter_raw()
     }
 
-    /// Merge entries without recording a user iteration (update plumbing/census).
+    /// `iter` that no trace sees, for the trace itself and for counts.
     #[inline]
     pub(crate) fn iter_raw(&self) -> AttrIter {
         let mut it = AttrIter {
@@ -980,7 +1037,7 @@ impl Word {
         if self.tag() == TAG_THUNK_MAP {
             state == Word::NULL || state.failed_index().is_some()
         } else {
-            state.bits() & !FORCED_BITS != 0 && !state.is_blackhole()
+            state.bits() & !FORCED_BITS != 0 && !state.is_blackhole() && !state.is_traced()
         }
     }
 
@@ -991,11 +1048,18 @@ impl Word {
         state == Word::SPECULATED || state == Word::SPECULATED_FX
     }
 
+    /// Whether this packed map entry stores its result in the state word
+    /// itself. Trace metadata must leave that result intact.
+    #[inline]
+    pub(crate) fn thunk_holds_value(self, state: Word) -> bool {
+        self.tag() == TAG_THUNK_MAP && state.is_function()
+    }
+
     /// A demanded map entry can keep its function in its state word. The
     /// entry itself then still holds the unique map word used by equality.
     #[inline]
     pub(crate) fn thunk_value(self, state: Word) -> Word {
-        if self.tag() == TAG_THUNK_MAP && state.bits() & !FORCED_BITS != 0 {
+        if self.tag() == TAG_THUNK_MAP && !state.is_traced() && state.bits() & !FORCED_BITS != 0 {
             state
         } else {
             self.thunk_code_cell().get()
@@ -1329,7 +1393,9 @@ impl Arena {
             p.write(AttrsObj {
                 kind: Kind::Attrs,
                 origin: bucket.attrs_origin(),
+                #[cfg(feature = "stats2")]
                 flags: Default::default(),
+                fine_flags: Default::default(),
                 leaves: 1,
                 len: AtomicU32::new(n as u32),
             });
@@ -1366,7 +1432,9 @@ impl Arena {
             p.write(AttrsObj {
                 kind: Kind::AttrsUnion,
                 origin: Stat::AttrsUpd.attrs_origin(),
+                #[cfg(feature = "stats2")]
                 flags: Default::default(),
+                fine_flags: Default::default(),
                 leaves: n as u8,
                 len: AtomicU32::new(u32::MAX),
             });
@@ -1409,6 +1477,7 @@ impl Arena {
         let cap = a.leaf_sets().iter().map(|l| l.len_raw() as usize).sum();
         let out = self.alloc_attrs_as(cap, Stat::AttrsUpd);
         let mut n = 0;
+        fine::spread(a);
         if let [l, r] = a.leaf_sets() {
             // `a // b`, the usual union: a two-way merge, the right side
             // winning a tie, skips the loser tree's bookkeeping
@@ -1447,6 +1516,8 @@ impl Arena {
         let out: &'static AttrsObj = out;
         a.len.store(n as u32, Ordering::Relaxed);
         u.flat.set(Word::from_ref(out));
+        fine::same(out, a);
+        fine::flattened(out, a);
         out
     }
 
@@ -1564,8 +1635,8 @@ impl Arena {
     /// `mapAttrs f src` for a flat `src` of at most `MAP_MAX_IDX + 1`
     /// entries: the result's cells are the thunks, no object per entry.
     pub(crate) fn mk_map_attrs(&mut self, f: Word, src: &'static AttrsObj) -> Word {
-        debug_assert!(!src.is_union() && src.len() <= Word::MAP_MAX_IDX + 1);
-        let n = src.len();
+        debug_assert!(!src.is_union() && src.len_quiet() <= Word::MAP_MAX_IDX + 1);
+        let n = src.len_quiet();
         let out: *mut AttrsObj = self.alloc_attrs_as(n, Stat::AttrsMap);
         let size = size_of::<MapDesc>() + n * size_of::<Cell>();
         self.stats.note(Stat::ThunkMap, size);
@@ -1589,6 +1660,7 @@ impl Arena {
             // SAFETY: exclusive access to the fresh set during the fill.
             unsafe { (*out).init(i, a.sym, Pos::NONE, Word::thunk_map_from_ref(&*desc, i)) };
         }
+        fine::same(out_ref, src);
         Word::from_ref(out_ref)
     }
 

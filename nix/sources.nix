@@ -9,7 +9,7 @@ let
 in
 {
   bin = sourceOf bin;
-  test = sourceOf (bin ++ [ ../tests ../examples ../.config/nextest.toml ]);
+  test = sourceOf (bin ++ [ ../tests ../examples ../.config/nextest.toml ../bench/incremental/fcheck.awk ../bench/incremental/fcmp.awk ]);
   ab = sourceOf (bin ++ [ ../examples/ab.rs ]);
   bench = sourceOf [ ../bench/Cargo.toml ../bench/Cargo.lock ../bench/eval.rs ];
   fuzz = sourceOf (bin ++ [ ../fuzz ]);

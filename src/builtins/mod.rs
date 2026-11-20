@@ -19,6 +19,7 @@ pub mod text;
 use crate::eval::{Evaluator, Pos};
 use crate::runtime::{PrimFn, Word};
 use crate::syntax::symbol::Sym;
+use crate::trace::fine;
 
 pub struct Registry {
     pub ops: Vec<(&'static str, u8, PrimFn)>,
@@ -100,6 +101,9 @@ pub fn install(ev: &mut Evaluator) {
 
     let mut entries: Vec<(Sym, Pos, Word)> = Vec::new();
     for (name, arity, f) in &r.ops {
+        if matches!(builtins_name(name), "fineRoot" | "fineQuery") && !fine::on() {
+            continue;
+        }
         let gsym = ev.sym(name.as_bytes());
         let w = ev.arena.mk_primop(name, *arity, *f, gsym);
         let bsym = ev.sym(builtins_name(name).as_bytes());

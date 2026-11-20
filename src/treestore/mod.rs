@@ -50,7 +50,7 @@ use crate::store::hash::{Hash, HashAlgo, Hasher};
 use crate::store::nar::{FileType, PathFilter};
 use crate::store::path::{IngestionMethod, StorePath, make_fixed_output_path};
 use crate::sys::errno;
-use crate::trace::Obs;
+use crate::trace::{Obs, fine};
 use std::cmp::Reverse;
 use std::sync::atomic::Ordering::{self, Relaxed};
 
@@ -583,14 +583,18 @@ pub fn collect(root: &Path, dry_run: bool) -> pack::Collected {
 /// version that says the entry can still be read, is the whole check: there is
 /// nothing per file to stat and nothing to rehash (docs/explanation/caching.md).
 pub fn record(ev: &Evaluator, tree: &StoredTree, name: &str) {
+    let input = || Obs::Input {
+        entry: name.as_bytes().to_vec(),
+        version: spool::INDEX_VERSION,
+    };
     if let Some(id) = ev.trace().readset_id()
         && tree.recorded_by.load(Relaxed) != id
     {
-        ev.trace().record(Obs::Input {
-            entry: name.as_bytes().to_vec(),
-            version: spool::INDEX_VERSION,
-        });
+        ev.trace().record(input());
         tree.recorded_by.store(id, Relaxed);
+    } else if fine::on() {
+        // A different job may have recorded the entry in the command read set.
+        fine::outside(&input());
     }
 }
 

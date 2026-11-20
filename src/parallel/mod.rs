@@ -98,7 +98,9 @@ pub fn try_run<R: Send + 'static>(
     // the input store reads the current session, and the workers inherit it
     // so their arenas map into its heap
     let _entered = ev.session().clone().enter();
-    if workers <= 1 {
+    // Fine tracing keeps its observation stack on the calling thread. Only the
+    // serial force path records edges when another slot reads a forced thunk.
+    if workers <= 1 || crate::trace::fine::on() {
         let r = f(&mut ev);
         ev.lints.flush();
         return Ok(r);

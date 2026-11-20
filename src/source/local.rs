@@ -23,7 +23,7 @@ use crate::store::hash::{Hash, HashAlgo};
 use crate::store::nar;
 use crate::store::path::StorePath;
 use crate::store::source::{SourceOrigin, SrcPath};
-use crate::trace::{self, Kind, Trace, TreeFp};
+use crate::trace::{self, Kind, Trace, TreeFp, fine};
 use crate::treestore;
 
 /// A directory copied whole, as a `path:` input.
@@ -64,6 +64,7 @@ pub fn path_tree(
     };
     let mut fp = ev.trace().fp(dir);
     let (hash, nar_size, mtime) = dump_and_max_mtime(dir, &mut fp).map_err(io)?;
+    fine::tree_mtime();
     if expect.is_some_and(|e| *e != hash) {
         return Ok(Err(hash));
     }

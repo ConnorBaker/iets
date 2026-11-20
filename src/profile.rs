@@ -197,6 +197,10 @@ impl Stack {
         }
     }
 
+    pub fn frames(&self) -> &[u64] {
+        &self.frames
+    }
+
     #[inline]
     pub fn depth(&self) -> usize {
         self.frames.len()

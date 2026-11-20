@@ -1,16 +1,22 @@
 //! `iets eval`: evaluate an expression and print it.
 
 use std::collections::HashSet;
+use std::env;
 use std::time::Instant;
 
 use crate::cli::{self, EvalArgs, render, report, run_for};
 use crate::eval::{Evaluator, Pos};
+use crate::trace::fine;
 use crate::trace::run::Cache;
 use crate::trace::store::Part;
 use crate::{print, treestore};
 
 pub fn run_eval(a: EvalArgs) -> i32 {
-    let mut run = run_for(&a).cached(&a, "eval");
+    let mut run = run_for(&a);
+    // A cached rendering cannot reproduce the observations made to obtain it.
+    if env::var_os("IETS_FINE_TRACE").is_none() {
+        run = run.cached(&a, "eval");
+    }
     if let Some(out) = run.hit(|c| {
         let out = c.part(Part::Result)?;
         c.replay_warnings();
@@ -33,7 +39,9 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
     let timings = a.timings;
     let evaluating = cli::evaluating(&a);
     let mut out: Vec<u8> = Vec::new();
+    let mut last = None;
     let r = cli::evaluate_each(ev, &a, |ev, v| {
+        last = Some(v);
         let start = out.len();
         if raw {
             // nix eval --raw: coerce without copying to the store, no newline
@@ -51,7 +59,11 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
         } else if json {
             // nix eval --json forces the whole value, --strict or not (eval.cc)
             let mut ctx = Vec::new();
-            print::print_json(ev, v, &mut out, &mut ctx, true, Pos::NONE)?;
+            let jobs = fine::on();
+            if jobs {
+                fine::begin_json_output();
+            }
+            print::print_json_output(ev, v, &mut out, &mut ctx, true, Pos::NONE, jobs)?;
         } else {
             let v = if strict {
                 ev.force_deep(v)?
@@ -75,8 +87,12 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
     if ev.session().settings().stats >= 1 {
         ev.print_stats();
     }
+    let traces_written = !fine::on() || fine::dump(ev, last);
     if let Err(e) = r {
         return report(ev, &e);
+    }
+    if !traces_written {
+        return 1;
     }
     if timings {
         eprintln!("eval: {:.3}s", t0.elapsed().as_secs_f64());

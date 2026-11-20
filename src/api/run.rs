@@ -8,6 +8,7 @@ use crate::parallel;
 use crate::parallel::fiber::StackError;
 use crate::session::Session;
 use crate::store::path::StorePath;
+use crate::trace::fine;
 use crate::trace::run::Cache;
 use crate::trace::store::Part;
 
@@ -133,7 +134,12 @@ impl Run {
         f: impl FnOnce(&mut Evaluator, Option<Cache>) -> R + Send + 'static,
     ) -> Result<R, StackError> {
         let store = self.cache.as_ref().map(|c| &c.store);
-        let ev = self.cfg.trace_in(store).build();
+        let mut cfg = self.cfg.trace_in(store);
+        fine::init();
+        if fine::on() {
+            cfg = cfg.trace(true).ir_cache(None);
+        }
+        let ev = cfg.build();
         let cache = self.cache;
         parallel::try_run(self.workers, ev, move |ev| f(ev, cache))
     }
@@ -153,6 +159,17 @@ impl Run {
             Err(Error::Eval(e)) => Outcome::Failed(report(ev, &e)),
             Err(e) => Outcome::Failed(e.report()),
         })
+    }
+}
+
+/// `iets fine-check` and `iets fine-regions`, the commands of the incremental
+/// prototype (docs/explanation/incremental.md): their exit code, or `None`
+/// for another command.
+pub fn fine_command(cmd: &str, argv: &[String]) -> Option<i32> {
+    match cmd {
+        "fine-check" => Some(fine::check_main(argv)),
+        "fine-regions" => Some(fine::regions_main(argv)),
+        _ => None,
     }
 }
 
