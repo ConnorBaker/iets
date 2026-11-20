@@ -927,7 +927,7 @@ impl Evaluator {
     ) -> EvalResult<IrRef> {
         let file = self.files.add_text(path, &src);
         let lints = self.compile_lints(path);
-        self.compile_source_inner(file, &src, base_dir, extra_scope, Some(&lints))
+        self.compile_source_inner(file, None, &src, base_dir, extra_scope, Some(&lints))
             .map(|(ir, _, _)| ir)
     }
 
@@ -941,7 +941,7 @@ impl Evaluator {
     ) -> EvalResult<IrRef> {
         let file = self.add_file(path, &src);
         let lints = self.compile_lints(path);
-        self.compile_source_inner(file, &src, base_dir, extra_scope, Some(&lints))
+        self.compile_source_inner(file, Some(path), &src, base_dir, extra_scope, Some(&lints))
             .map(|(ir, _, _)| ir)
     }
 
@@ -949,7 +949,7 @@ impl Evaluator {
     /// never linted.
     pub fn compile_internal(&mut self, path: &[u8], src: &[u8]) -> EvalResult<IrRef> {
         let file = self.files.add_text(path, src);
-        self.compile_source_inner(file, src, b"/", None, None)
+        self.compile_source_inner(file, None, src, b"/", None, None)
             .map(|(ir, _, _)| ir)
     }
 
@@ -958,6 +958,7 @@ impl Evaluator {
     fn compile_source_inner(
         &mut self,
         file: FileId,
+        file_path: Option<&[u8]>,
         src: &[u8],
         base_dir: &[u8],
         extra_scope: Option<&[Sym]>,
@@ -983,7 +984,8 @@ impl Evaluator {
             base_dir,
             lints,
         );
-        c.fine = origin == Origin::File && fine::on();
+        let fine_path = file_path.filter(|_| fine::on());
+        c.fine = fine_path.is_some();
         let r = c.compile_root(extra_scope);
         let used_home = c.used_home.get();
         let cacheable = !used_home && !c.diags_depend_on_symbol_order;
@@ -1005,7 +1007,7 @@ impl Evaluator {
         if self.prof.on() {
             self.session.profile.note_ir(ir);
         }
-        if origin == Origin::File && fine::on() {
+        if let Some(path) = fine_path {
             fine::compiled(self, path, ir, base);
         }
         self.report_diags(&diags);
@@ -1036,6 +1038,10 @@ impl Evaluator {
     ) -> EvalResult<IrRef> {
         if path.starts_with(CorePkgs::PREFIX) {
             return self.compile_internal(path, &src);
+        }
+        // Fine traces need this capture's region IDs and compile-time provenance.
+        if fine::on() {
+            return self.compile_path(path, src, base_dir, None);
         }
         let Some(cache) = self.ir_cache.clone() else {
             return self.compile_path(path, src, base_dir, None);
@@ -1085,7 +1091,8 @@ impl Evaluator {
             }
         }
         self.interner.file_symbols = Some(Box::default());
-        let result = self.compile_source_inner(file, &src, base_dir, None, Some(&lints));
+        let result =
+            self.compile_source_inner(file, Some(path), &src, base_dir, None, Some(&lints));
         let symbols = self.interner.file_symbols.take().expect("compiling a file");
         let (ir, cacheable, diags) = result?;
         let t1 = Instant::now();

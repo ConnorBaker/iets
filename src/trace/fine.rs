@@ -1025,6 +1025,8 @@ pub fn outside(o: &Obs) {
         _ => {}
     }
     let line = match o {
+        // This observation is recorded only when import followed a symlink.
+        Obs::ImportPath { .. } => return followed_link(),
         Obs::File { path, hash, .. } => format!("F\t{}\t{}", path_field(path), hex(hash)),
         Obs::Dir { path, hash } => format!("D\t{}\t{}", path_field(path), hex(hash)),
         Obs::Stat { path, kind, .. } => format!("S\t{}\t{}", path_field(path), kind_name(*kind)),

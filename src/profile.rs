@@ -271,6 +271,7 @@ impl Profile {
                 }
             };
             match ir {
+                Ir::Region { body, .. } => todo.push(body),
                 Ir::Attrs(a) => {
                     bind(a.binds);
                     todo.extend(a.from);
@@ -544,7 +545,7 @@ mod tests {
         v
     }
 
-    use crate::compile::ir::{AttrsIr, BindScope, FormalIr, LambdaIr, LetIr};
+    use crate::compile::ir::{AttrsIr, BindScope, FormalIr, LambdaIr, LetIr, NO_LIT};
     use crate::runtime::Word;
 
     fn leak<T>(v: T) -> &'static T {
@@ -596,6 +597,7 @@ mod tests {
         let p = Profile::default();
         let (a, b, c, d) = (konst(), konst(), konst(), konst());
         let set = leak(Ir::Attrs(leak(AttrsIr {
+            lit: NO_LIT,
             rec: false,
             binds: leak([bind(2, b, 20)]),
             from: &[],
