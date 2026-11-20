@@ -959,6 +959,14 @@ pub fn outside(o: &Obs) {
     with(|s| s.record(O::Out(line)));
 }
 
+/// A source tree's newest mtime is observable as `lastModified`. A Git
+/// change list cannot say whether a checkout preserved that time.
+pub(crate) fn tree_mtime() {
+    if on() {
+        with(|s| s.record(O::Out("TreeMtime".into())));
+    }
+}
+
 /// After the compile of `path` with `root` as its IR: the regions and the
 /// literals of the file.
 pub fn compiled(ev: &Evaluator, path: &[u8], root: IrRef, base: u32) {
@@ -1912,7 +1920,7 @@ fn leaves(c: &Changes, provs: &str) -> Vec<Vec<NameChange>> {
     leaves
 }
 
-const TRACE_VERSION: &str = "V\tjob-trace-v2\n";
+const TRACE_VERSION: &str = "V\tjob-trace-v3\n";
 
 fn read_words(path: &std::path::Path) -> std::io::Result<Vec<u32>> {
     Ok(std::fs::read(path)?
@@ -1931,7 +1939,7 @@ fn read_observations(dir: &Path) -> io::Result<String> {
         .ok_or_else(|| {
             io::Error::new(
                 ErrorKind::InvalidData,
-                "regenerate the fine graph to record job outputs and uncacheable forces",
+                "regenerate the fine graph with current read evidence",
             )
         })?;
     observations.truncate(rows.len());
@@ -2152,6 +2160,9 @@ impl ObsIndex {
                     .entry(a.to_string())
                     .or_default()
                     .push((i, b.parse().unwrap_or(0))),
+                // Revision deltas carry no environment, SCM command results,
+                // input-store presence, or checkout timestamps.
+                "E" | "Q" | "I" | "TreeMtime" => x.every.push(i),
                 "F" | "C" => push(&mut x.files, a, i),
                 "T" => push(&mut x.trees, a, i),
                 "S" => push(&mut x.stats, a, i),
