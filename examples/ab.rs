@@ -551,6 +551,9 @@ mod ab {
         for pass in 0..2 {
             let mut entries = match fs::read_dir(procfs) {
                 Ok(entries) => entries,
+                // A complete direct view already covers our children. The
+                // process table adds discovery when available, but is optional.
+                Err(_) if direct => return result,
                 Err(e) => return result.and(Err(e)),
             };
             while Instant::now() < deadline {
