@@ -1462,11 +1462,11 @@ mod ab {
             );
             assert_eq!(last.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
 
-            // Stopping discovery does not excuse a child that is still running.
+            // An exhausted discovery budget does not excuse a child still running.
+            // #433 may still admit a bounded first direct pass after its deadline;
+            // this control deliberately models a sweep with no remaining checks.
             let mut live = Command::new("sleep").arg("30").spawn().unwrap();
-            let result = reap_after(Duration::ZERO, Duration::from_millis(20), |_| {
-                kill_leftovers(Instant::now())
-            });
+            let result = reap_after(Duration::ZERO, Duration::from_millis(20), |_| Ok(()));
             live.kill().unwrap();
             live.wait().unwrap();
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
