@@ -566,9 +566,9 @@ fn ir_hit_replays_symbol_order_from_folded_source(work: Work) {
 #[rstest]
 fn compiler_only_names_follow_the_current_binding_order(work: Work) {
     // The parser keeps each escaped indented string as a dynamic name.
-    // The compiler folds it to a symbol while lowering the enclosing let.
+    // Selection lowering interns that name while compiling the enclosing let.
     let seed = work.write("seed.nix", &format!(
-        "# {}\nlet orderA = {{ ${{''throw''$marker''}} = 0; }}; orderB = {{ ${{''unequal''$marker''}} = 0; }}; in 1",
+        "# {}\nlet orderA = {{}}.${{''throw''$marker''}}; orderB = {{}}.${{''unequal''$marker''}}; in 1",
         "pad".repeat(128)
     ));
     work.write("prefix.nix", "{ orderB = 0; orderA = 0; }");
