@@ -1,13 +1,15 @@
 use std::collections::HashSet;
+use std::fs;
 
 use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
 
+use crate::api::value::Eval;
 use crate::compile::Compiler;
 use crate::lint::{Config, Level};
-use crate::print;
 use crate::runtime::Value;
 use crate::syntax::{self, ast::FileId};
+use crate::{print, sys};
 
 fn eval_with(mut ev: Evaluator, src: &str) -> Result<String, String> {
     let v = ev
@@ -675,7 +677,15 @@ fn folded_builtin_select_records_only_retained_reads(
     let src = format!("let outer = 42; in x: {body}").into_bytes();
     let file = ev.files.add_text(b"test", &src);
     let ast = syntax::parse(&src, file, &mut ev.interner).unwrap();
-    let mut compiler = Compiler::new(&ast, &mut ev.arena, &mut ev.interner, &ev.globals, 0, b"/", None);
+    let mut compiler = Compiler::new(
+        &ast,
+        &mut ev.arena,
+        &mut ev.interner,
+        &ev.globals,
+        0,
+        b"/",
+        None,
+    );
     let ir = compiler.compile_root(None).unwrap();
     let used_home = compiler.used_home.get();
     let Value::Lambda(lambda) = ev.eval(ev.root_env, ir).unwrap().view() else {
@@ -891,4 +901,58 @@ fn failed_builtin_selection_tail_is_bound_once() {
     let error = compiler.compile_root(None).err().unwrap();
     assert!(error.msg.contains("undefined variable 'missing'"));
     assert_eq!(compiler.diags.len(), 1);
+}
+
+#[test]
+fn flat_path_keeps_the_bytes_it_addressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file");
+    fs::write(&file, b"original").unwrap();
+    let mut ev = Evaluator::new();
+    let mut api = Eval::new(&mut ev);
+    let values = api
+        .eval_expr(
+            r#"let p = builtins.path { path = ./file; recursive = false; };
+                   copy = recursive: builtins.path { path = p; inherit recursive; name = "copy"; };
+               in [ p (builtins.readFile p) (builtins.pathExists (p + "/later"))
+                    (builtins.readFile (copy false)) (builtins.readFile (copy true)) ]"#,
+            &sys::path_to_internal(dir.path()),
+        )
+        .unwrap();
+    api.force(values.list_get(0).unwrap()).unwrap();
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    fs::write(file.join("later"), b"new child").unwrap();
+    assert_eq!(
+        api.force(values.list_get(1).unwrap()).unwrap().as_bytes(),
+        Some(&b"original"[..])
+    );
+    assert_eq!(
+        api.force(values.list_get(2).unwrap()).unwrap().as_bool(),
+        Some(false)
+    );
+    for i in [3, 4] {
+        assert_eq!(
+            api.force(values.list_get(i).unwrap()).unwrap().as_bytes(),
+            Some(&b"original"[..])
+        );
+    }
+}
+
+#[test]
+fn mismatched_path_does_not_register_the_computed_store_path() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("file"), b"wrong content").unwrap();
+    let base = sys::path_to_internal(dir.path());
+    let mut ev = Evaluator::new();
+    let initial = ev.known.origins().len();
+    for recursive in [false, true] {
+        let src = format!(
+            r#"builtins.path {{ path = ./file; recursive = {recursive}; sha256 = "{}"; }}"#,
+            "0".repeat(64)
+        );
+        let error = ev.eval_string(&src, &base).unwrap_err();
+        assert!(error.msg.contains("store path mismatch"), "{}", error.msg);
+        assert_eq!(ev.known.origins().len(), initial);
+    }
 }
