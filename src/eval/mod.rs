@@ -988,6 +988,7 @@ impl Evaluator {
         );
         let r = c.compile_root(extra_scope);
         let used_home = c.used_home.get();
+        let cacheable = !used_home && !c.diags_depend_on_symbol_order;
         let diags = mem::take(&mut c.diags);
         self.arena
             .stats
