@@ -18,8 +18,9 @@ and whole Nixpkgs jobsets, which can need more than 20 GiB. `--only` filters
 scenario names. `NIXPKGS` overrides the locked input. Cold means evaluator
 caches, not a cold OS page cache. The runner alternates pairs, checks output
 parity and reports intervals; `--threshold` gates wall time and peak RSS.
-Hardware counters are descriptive estimates scaled by PMU enabled/running time;
-unscheduled events are omitted and short-run coverage can still be poor.
+The native runner reports hardware counters for a run only when every event
+ran for its full, nonzero enabled time. A missing counter set also omits the
+scenario’s counter intervals. Wall time and peak RSS remain available.
 
 For repeatable instruction comparisons, use Gungraun's built-in baselines,
 regression gates and per-thread reporting:
@@ -31,10 +32,31 @@ nix run .#bench-callgrind -- --baseline=before --callgrind-limits='Ir=5%' \
   --callgrind-metrics=Ir --show-intermediate --save-summary=json
 ```
 
-The four evaluation fixtures cover calls, strings, attribute updates/lookups
-and derivations. They run with one worker, strict JSON and disabled evaluator
-caches. Independent teardown checks compare full expected output outside the
-measurement; successful exit alone does not prove that the work ran.
+The evaluation fixtures cover calls, strings, attribute updates and lookups,
+and input-addressed and fixed-output derivations. Each runs with one worker,
+strict JSON and disabled evaluator caches. Teardown checks the full expected
+output outside the measurement.
+
+To profile fixed-output path construction, select the fixture that evaluates
+500 derivations with 100 distinct recipes. Its result checks both the derivation
+paths and the output paths for flat and recursive hashes.
+
+```sh
+nix run .#bench-callgrind -- '*::evaluation::*::fixed_derivations' \
+  --callgrind-args='--cache-sim=no --dump-instr=yes' --callgrind-metrics=Ir
+```
+
+To profile ordinary derivations with producer inputs, run:
+
+```sh
+nix run .#bench-callgrind -- '*::evaluation::*::producer_inputs' --save-summary=json
+```
+
+Each of 32 consumers depends on four shared tools, three rotating producers
+and one individual leaf. All 256 edges select the producer's `out` output.
+The case exercises input-context parsing and derivation hashing. Its measurement
+also includes constructing the 84 recipes and hashing the ordered consumer
+paths. Teardown checks that path digest against C++ Nix.
 
 Four component cases share generated literal input with 2,000 nested bindings:
 
@@ -58,6 +80,11 @@ Setup/teardown are outside that boundary. The production allocator is retained;
 `std::process::exit` does not run stack destructors. Differences between whole
 commands are not exact phase subtractions, and instructions do not establish
 elapsed time, syscall cost or parallel scaling.
+
+Valgrind can also change CPU feature detection. On an Intel host with SHA
+extensions, the same release and fixed-output fixture used hardware SHA-256
+natively and software SHA-256 under Callgrind. Check the native profile before
+using a simulated hotspot to choose an optimization.
 
 Raw profiles and JSON summaries are retained under `target/gungraun/<target-triple>`.
 `--show-intermediate` exposes process/thread fragments as well as totals.
@@ -130,8 +157,9 @@ needed for rustix on recent Linux until nixpkgs includes it.
 cases natively with Gungraun's `--test` and then under Valgrind. Build-time counts
 are discarded. CI measures outside derivations, using the candidate's locked
 inputs for both executables. It publishes the runner's instruction/thread
-output directly and uploads JSON/raw profiles. The baseline may have stripped
-debug information; retain debug information on both sides for source annotation.
+output directly and uploads JSON/raw profiles. Both CI comparisons use the same
+two release packages. For source annotation, run the local harness with debug
+information retained on both sides.
 
 For an unbounded whole-Nixpkgs evaluation, explicitly disable the default 4 GiB
 worker-process restart threshold. `--max-memory-size 0` selects one shared
