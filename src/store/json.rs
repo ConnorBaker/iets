@@ -217,7 +217,10 @@ impl Parser<'_> {
                 if let StringError::Utf8 = e {
                     return self.invalid_utf8(self.i - 1);
                 }
-                let message = format!("syntax error while parsing value - invalid string: {}", e.reason(true));
+                let message = format!(
+                    "syntax error while parsing value - invalid string: {}",
+                    e.reason(true)
+                );
                 if let StringError::Hex = e {
                     return self.error_at_byte(&message, self.i);
                 }
@@ -245,11 +248,7 @@ impl Parser<'_> {
 
     fn error_at_byte<T>(&self, what: &str, bad: usize) -> Result<T, DrvError> {
         let end = (bad + 1).min(self.s.len());
-        Self::parse_error(
-            what,
-            &self.s[..end],
-            usize::from(bad == self.s.len()),
-        )
+        Self::parse_error(what, &self.s[..end], usize::from(bad == self.s.len()))
     }
 
     fn number(&mut self) -> Result<String, DrvError> {
