@@ -978,7 +978,7 @@ impl Word {
     #[inline]
     pub(crate) fn thunk_unforced(self, state: Word) -> bool {
         if self.tag() == TAG_THUNK_MAP {
-            state == Word::NULL
+            state == Word::NULL || state.failed_index().is_some()
         } else {
             state.bits() & !FORCED_BITS != 0 && !state.is_blackhole()
         }
