@@ -184,7 +184,7 @@ impl<'a> Compiler<'a> {
         for (sym, def, bpos) in statics {
             let value = match def {
                 Def::Expr(e) => Some(c.value_expr(*e, Some(*sym)).ok()?),
-                Def::Inherit(var) => Some(c.var_ir(*var, *bpos).ok()?),
+                Def::Inherit => Some(c.var_ir(*sym, *bpos).ok()?),
                 Def::Nested(_) | Def::InheritFrom(..) => None,
             };
             values.push(value);
