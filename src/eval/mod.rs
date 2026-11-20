@@ -1011,7 +1011,7 @@ impl Evaluator {
         // Recursive bindings and formal defaults compile in symbol order.
         // If folding them interns a name the parser never saw, which name
         // comes first can depend on the imports preceding this file.
-        let cacheable = !used_home
+        let cacheable = cacheable
             && self.interner.file_symbols.as_ref().is_none_or(|symbols| {
                 symbols.order[parsed..]
                     .iter()
