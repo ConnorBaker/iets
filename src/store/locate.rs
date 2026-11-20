@@ -40,7 +40,6 @@ impl Slot {
 #[derive(Default)]
 pub(crate) struct References(Mutex<HashMap<String, Arc<Slot>>>);
 
-
 impl References {
     fn slot(&self, full: &str) -> (Arc<Slot>, bool) {
         let mut table = self.0.lock().expect("references cache");
