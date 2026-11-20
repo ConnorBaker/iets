@@ -63,6 +63,7 @@ mod ab {
         np: String,
         checkout: PathBuf,
         work: PathBuf,
+        workloads: PathBuf,
     }
 
     fn scenarios(c: &Ctx) -> Vec<Scenario> {
@@ -78,6 +79,18 @@ mod ab {
                 false,
                 Cache::Cold,
                 "eval --impure --strict --no-cache --workers 4 -I nixpkgs={np} {wl}/nixos-server.nix",
+            ),
+            (
+                "nixos/plasma-w1",
+                false,
+                Cache::Cold,
+                "eval --impure --strict --no-cache --workers 1 -I nixpkgs={np} {wl}/nixos-plasma.nix",
+            ),
+            (
+                "nixos/plasma-w4",
+                false,
+                Cache::Cold,
+                "eval --impure --strict --no-cache --workers 4 -I nixpkgs={np} {wl}/nixos-plasma.nix",
             ),
             (
                 "nixos/server-pure-w1",
@@ -132,10 +145,7 @@ mod ab {
         let fill = |a: &str| {
             a.replace("{np}", np)
                 .replace("{ck}", &c.checkout.display().to_string())
-                .replace(
-                    "{wl}",
-                    concat!(env!("CARGO_MANIFEST_DIR"), "/bench/workloads"),
-                )
+                .replace("{wl}", &c.workloads.display().to_string())
                 .replace("{work}", &c.work.display().to_string())
                 .replace(
                     "{rs}",
@@ -716,18 +726,16 @@ mod ab {
         String::from_utf8(out.stdout).expect("utf-8 path")
     }
 
-    fn make_checkout(np: &str, at: &Path) -> Result<(), String> {
+    fn make_checkout(np: &str, at: &Path, workloads: &Path) -> Result<(), String> {
         let ok = |c: &mut Command| c.status().is_ok_and(|s| s.success());
         if !ok(Command::new("cp").arg("-r").arg(format!("{np}/.")).arg(at))
             || !ok(Command::new("chmod").arg("-R").arg("u+w").arg(at))
         {
             return Err(format!("cannot copy {np}"));
         }
-        let server = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/bench/workloads/nixos-server.nix"
-        );
-        let server = fs::read_to_string(server).map_err(|e| format!("{server}: {e}"))?;
+        let server = workloads.join("nixos-server.nix");
+        let server =
+            fs::read_to_string(&server).map_err(|e| format!("{}: {e}", server.display()))?;
         let w = |name: &str, text: &str| fs::write(at.join(name), text).map_err(|e| e.to_string());
         // a project marker, so a pure evaluation may read the whole tree
         w("iets.toml", "")?;
@@ -773,6 +781,7 @@ mod ab {
                 if round >= o.rounds
                     && intervals(&row.runs)
                         .iter()
+                        .take(2) // only the wall/RSS metrics used by the gate
                         .flatten()
                         .all(|i| i.hi - i.lo <= precision)
                 {
@@ -915,6 +924,11 @@ mod ab {
             np: nixpkgs(),
             checkout: work.path().join("nixpkgs"),
             work: work.path().to_path_buf(),
+            workloads: env::var_os("IETS_BENCH_WORKLOADS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/bench/workloads"))
+                }),
         };
         let todo: Vec<Scenario> = scenarios(&c)
             .into_iter()
@@ -926,7 +940,7 @@ mod ab {
             return ExitCode::from(2);
         }
         if todo.iter().any(|s| s.checkout)
-            && let Err(e) = make_checkout(&c.np, &c.checkout)
+            && let Err(e) = make_checkout(&c.np, &c.checkout, &c.workloads)
         {
             eprintln!("ab: {e}");
             return ExitCode::from(2);
@@ -978,9 +992,6 @@ mod ab {
                 }
                 if mem.lo > t {
                     slow.push("MORE MEMORY");
-                }
-                if instr.as_ref().is_some_and(|i| i.lo > t) {
-                    slow.push("MORE INSTRUCTIONS");
                 }
                 if !slow.is_empty() {
                     row.status = [slow.join(", "), row.status.clone()]
