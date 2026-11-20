@@ -499,7 +499,10 @@ mod ab {
                     let e = io::Error::last_os_error();
                     // A child may exit after the probe, losing signal permission first.
                     if e.raw_os_error() == Some(libc::EPERM)
-                        && matches!(children_state(libc::P_PID, pid as libc::id_t), Ok(Some(true)))
+                        && matches!(
+                            children_state(libc::P_PID, pid as libc::id_t),
+                            Ok(Some(true))
+                        )
                     {
                         return Ok(observe_ready);
                     }
@@ -1417,7 +1420,10 @@ mod ab {
             }
             assert!(Command::new("true").status().unwrap().success());
             let mut direct = Command::new("sleep").arg("30").spawn().unwrap();
-            assert_eq!(children_state(libc::P_PID, direct.id()).unwrap(), Some(false));
+            assert_eq!(
+                children_state(libc::P_PID, direct.id()).unwrap(),
+                Some(false)
+            );
             let t = Instant::now();
             Command::new("sh")
                 // a leftover with a child of its own, which comes to us once it is killed
