@@ -552,6 +552,7 @@ fn open_lock(path: &Path) -> io::Result<fs::File> {
         FILE_MODE,
     )
     .open(path)
+    .inspect_err(|e| eprintln!("CLONE_DIAG open_lock path={path:?} raw={:?} kind={:?} error={e}", e.raw_os_error(), e.kind()))
 }
 
 /// [`write_lock`] with the two failures apart: `Err` when the lock file
@@ -683,7 +684,9 @@ fn drop_clone(path: &Path, ttl: Duration) -> bool {
         return false;
     }
     // under the lock, so a waiter sees the file gone and locks a new one
-    let _ = fs::remove_file(&lock);
+    let removed = fs::remove_file(&lock);
+    #[cfg(all(test, windows))]
+    eprintln!("CLONE_DIAG unlink path={lock:?} result={removed:?} state={}", sysfs::diagnostic_state(&f));
     true
 }
 
@@ -1063,6 +1066,24 @@ mod tests {
 
     /// A waiter that queued on a lock file the sweep then removed must not
     /// take it alongside one that locked the new file at the same path.
+    #[cfg(windows)]
+    #[test]
+    fn diagnostic_unlink_while_a_handle_is_open() {
+        let d = tempdir().unwrap();
+        let path = d.path().join("diagnostic.lock");
+        let f = open_lock(&path).unwrap();
+        eprintln!("CLONE_DIAG held {}", sysfs::diagnostic_state(&f));
+        let removed = fs::remove_file(&path);
+        eprintln!("CLONE_DIAG direct_unlink result={removed:?} state={}", sysfs::diagnostic_state(&f));
+        let before = open_lock(&path);
+        eprintln!("CLONE_DIAG reopen_before_drop={:?}", before.as_ref().map(|_| ()).map_err(|e| (e.raw_os_error(), e.kind(), e.to_string())));
+        drop(before);
+        drop(f);
+        let after = open_lock(&path);
+        eprintln!("CLONE_DIAG reopen_after_drop={:?}", after.as_ref().map(|_| ()).map_err(|e| (e.raw_os_error(), e.kind(), e.to_string())));
+        assert!(after.is_ok());
+    }
+
     #[test]
     fn a_clone_lock_excludes_across_a_sweep() {
         let d = tempdir().unwrap();

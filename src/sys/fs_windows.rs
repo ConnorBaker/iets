@@ -234,7 +234,7 @@ pub fn try_lock(f: &File) -> bool {
 }
 
 pub fn lock(f: &File) -> bool {
-    f.lock().is_ok()
+    f.lock().inspect_err(|e| eprintln!("CLONE_DIAG blocking_lock raw={:?} kind={:?} error={e}", e.raw_os_error(), e.kind())).is_ok()
 }
 
 pub fn unlock(f: &File) {
@@ -346,5 +346,17 @@ mod tests {
         ] {
             assert!(one_component(n.as_bytes()), "{n}");
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn diagnostic_state(f: &File) -> String {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_STANDARD_INFO, FileStandardInfo};
+    let mut info: FILE_STANDARD_INFO = unsafe { mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandleEx(f.as_raw_handle(), FileStandardInfo, (&mut info as *mut FILE_STANDARD_INFO).cast(), size_of::<FILE_STANDARD_INFO>() as u32) };
+    if ok == 0 {
+        format!("query_error={:?}", io::Error::last_os_error())
+    } else {
+        format!("delete_pending={} links={}", info.DeletePending, info.NumberOfLinks)
     }
 }

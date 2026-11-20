@@ -1,0 +1,56 @@
+name: windows-clone-lock-research
+on:
+  push:
+    branches: [research/windows-clone-lock-20261120]
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: ${{ matrix.os }}-${{ matrix.source }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: [windows-latest, windows-11-arm]
+        source: [control, diagnostic]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.source == 'control' && '9157ca1a2a50c085bcd7fd0004d9ba71e2b7c1e0' || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Freeze source and build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force receipts | Out-Null
+          git rev-parse HEAD | Out-File receipts/source.txt
+          git hash-object src/cachefs.rs src/sys/fs_windows.rs | Out-File receipts/blobs.txt
+          rustc -vV | Out-File receipts/rustc.txt
+          cargo test --locked --lib --no-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Repeated focused observations
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $ErrorActionPreference = 'Continue'
+          $rows = @()
+          if ('${{ matrix.source }}' -eq 'diagnostic') {
+            cargo test --locked --lib cachefs::tests::diagnostic_unlink_while_a_handle_is_open -- --exact --nocapture *> receipts/direct-unlink.log
+            $rows += @{case='direct-unlink'; repeat=0; exit=$LASTEXITCODE}
+          }
+          for ($i=0; $i -lt 8; $i++) {
+            cargo test --locked --lib cachefs::tests::a_clone_lock_excludes_across_a_sweep -- --exact --nocapture *> "receipts/race-$i.log"
+            $rows += @{case='race'; repeat=$i; exit=$LASTEXITCODE}
+          }
+          $rows | ConvertTo-Json | Out-File receipts/results.json
+          Get-Content receipts/results.json
+          # Diagnostic completion records failures; this is not a green product check.
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clone-lock-${{ matrix.os }}-${{ matrix.source }}
+          path: receipts
