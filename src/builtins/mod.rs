@@ -84,7 +84,7 @@ pub fn install(ev: &mut Evaluator) {
     for (prefix, path) in ev.search_path().to_vec() {
         let p = ev.mk_string(&path);
         let pre = ev.mk_string(&prefix);
-        let mut e = vec![(ev.s.path, Pos::NONE, p), (ev.s.prefix, Pos::NONE, pre)];
+        let mut e = [(ev.s.path, Pos::NONE, p), (ev.s.prefix, Pos::NONE, pre)];
         items.push(ev.arena.mk_attrs(&mut e).unwrap());
     }
     let np = ev.mk_list(&items);
