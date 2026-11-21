@@ -104,8 +104,11 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                     kind_name(Kind::of(&Ok(m)))
                 ));
             }
-            if m.len() == *size
-                && mtime_ns(&m) == *mt
+            // A sized reader would see a different prefix even if a full read hashes the same.
+            if m.len() != *size {
+                return Outcome::Changed(format!("{} changed", lossy(path)));
+            }
+            if mtime_ns(&m) == *mt
                 && ctime_ns(&os(path), &m) == *ct
                 && file_id(&os(path), &m) == (*dev, *ino)
             {
@@ -299,6 +302,30 @@ mod tests {
     /// Windows lets only a handle opened for writing change the times.
     fn open_rw(p: &Path) -> fs::File {
         fs::OpenOptions::new().write(true).open(p).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_proc_stream_and_a_sized_read_observe_different_bytes() {
+        let proc = Path::new("/proc/version");
+        let Ok(bytes) = fs::read(proc) else { return };
+        if bytes.len() as u64 <= fs::metadata(proc).unwrap().len() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file");
+        let native = path.as_os_str().as_bytes();
+        fs::write(&path, &bytes).unwrap();
+        let trace = Trace::enabled();
+        trace.file(native, &fs::metadata(&path).unwrap(), &bytes);
+        let mut obs = trace.take();
+
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(proc, &path).unwrap();
+        assert!(validate(&mut obs, 1).is_err());
+
+        trace.file(native, &fs::metadata(&path).unwrap(), &bytes);
+        assert!(!trace.is_cacheable());
     }
 
     /// A rewrite of the same size in the same timestamp tick leaves the stat
