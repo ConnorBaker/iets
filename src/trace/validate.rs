@@ -1,6 +1,5 @@
 //! Checks a recorded read set against the world, on a few threads. Any
-//! mismatch is a miss. Stat-only checks come first; a file whose stat
-//! changed is rehashed and accepted when its content did not.
+//! mismatch is a miss. Recheck file and tree contents before using their results.
 
 use crate::sys::fs::file_id;
 use crate::sys::{self, OsStrExt};
@@ -13,7 +12,7 @@ use std::{fs, thread};
 
 use super::{
     Digest32, DirBuf, Kind, Obs, cmd_hash, ctime_ns, dir_hash, env_hash, file_obs, hash_to_digest,
-    mtime_ns, run_query, stat_kind, tree_fingerprint, tree_rehash,
+    mtime_ns, run_query, stat_kind, tree_rehash,
 };
 #[cfg(test)]
 use super::{dir_listing_hash, read_dir_kinds};
@@ -24,7 +23,7 @@ use crate::{session, treestore};
 #[derive(Debug, Default)]
 pub struct Report {
     pub entries: usize,
-    /// Files and trees whose contents were rehashed because their stat changed.
+    /// Files and trees whose contents were rehashed during validation.
     pub rehashed: usize,
     /// Entries whose stat fields were refreshed; the read set should be rewritten.
     pub refreshed: usize,
@@ -104,13 +103,10 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                     kind_name(Kind::of(&Ok(m)))
                 ));
             }
-            if m.len() == *size
+            let same_stat = m.len() == *size
                 && mtime_ns(&m) == *mt
                 && ctime_ns(&os(path), &m) == *ct
-                && file_id(&os(path), &m) == (*dev, *ino)
-            {
-                return Outcome::Same;
-            }
+                && file_id(&os(path), &m) == (*dev, *ino);
             rehashed.fetch_add(1, Ordering::Relaxed);
             let now = match file_sha256(&os(path)) {
                 Ok(h) => h,
@@ -119,7 +115,11 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
             if now != *hash {
                 return Outcome::Changed(format!("{} changed", lossy(path)));
             }
-            Outcome::Refresh(file_obs(path, &m, *hash))
+            if same_stat {
+                Outcome::Same
+            } else {
+                Outcome::Refresh(file_obs(path, &m, *hash))
+            }
         }
         Obs::Dir { path, hash } => match dir_hash(&os(path), dirs) {
             Ok(now) => {
@@ -156,11 +156,6 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 .as_ref()
                 .map(|f| f.accepted.iter().map(|p| os(p)).collect());
             let root_p = os(root);
-            match tree_fingerprint(&root_p, accepted.as_ref()) {
-                Ok((sh, _)) if sh == *stat_hash => return Outcome::Same,
-                Ok(_) => {}
-                Err(e) => return unreadable(root, &e),
-            }
             rehashed.fetch_add(1, Ordering::Relaxed);
             let (nar, seen, sh, now) = match tree_rehash(&root_p, accepted.as_ref()) {
                 Ok(t) => t,
@@ -178,6 +173,9 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                     "source tree {} has another modification time",
                     lossy(root)
                 ));
+            }
+            if sh == *stat_hash {
+                return Outcome::Same;
             }
             Outcome::Refresh(Obs::Tree {
                 root: root.clone(),
@@ -333,7 +331,7 @@ mod tests {
         let p = f.as_os_str().as_bytes().to_vec();
         let mut obs = vec![super::super::file_obs(&p, &m, sha256(b"1"))];
         let r = validate(&mut obs, 2).unwrap();
-        assert_eq!((r.rehashed, r.refreshed), (0, 0));
+        assert_eq!((r.rehashed, r.refreshed), (1, 0));
 
         // same content, new mtime: rehash once, refresh
         let later = SystemTime::now() - Duration::from_secs(30);
@@ -341,7 +339,7 @@ mod tests {
         let r = validate(&mut obs, 2).unwrap();
         assert_eq!((r.rehashed, r.refreshed), (1, 1));
         let r = validate(&mut obs, 2).unwrap();
-        assert_eq!((r.rehashed, r.refreshed), (0, 0));
+        assert_eq!((r.rehashed, r.refreshed), (1, 0));
 
         fs::write(&f, b"2").unwrap();
         assert!(validate(&mut obs, 2).is_err());
@@ -365,9 +363,37 @@ mod tests {
         let mut obs = trace.take();
         assert_eq!(obs.len(), 2);
         let r = validate(&mut obs, 2).unwrap();
-        assert_eq!((r.rehashed, r.refreshed), (0, 0));
+        assert_eq!((r.rehashed, r.refreshed), (1, 0));
         fs::write(&f, b"22").unwrap();
         assert!(validate(&mut obs, 2).is_err());
+    }
+
+    #[test]
+    fn matching_metadata_can_no_longer_hide_a_changed_file_or_tree() {
+        let d = tempdir().unwrap();
+        let f = d.path().join("input");
+        fs::write(&f, b"old").unwrap();
+        let (old_nar, _, _, _) = tree_rehash(d.path(), None).unwrap();
+        fs::write(&f, b"new").unwrap();
+        open_rw(&f)
+            .set_modified(SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+        let mut file = file_obs(
+            f.as_os_str().as_bytes(),
+            &fs::metadata(&f).unwrap(),
+            sha256(b"old"),
+        );
+        assert!(validate(std::slice::from_mut(&mut file), 1).is_err());
+
+        let (_, _, stat_hash, _) = tree_rehash(d.path(), None).unwrap();
+        let mut tree = Obs::Tree {
+            root: d.path().as_os_str().as_bytes().to_vec(),
+            nar_hash: old_nar,
+            stat_hash,
+            filtered: None,
+            newest: None,
+        };
+        assert!(validate(std::slice::from_mut(&mut tree), 1).is_err());
     }
 
     /// The evaluator records the resolved path from `sys::fs::canonicalize`.
