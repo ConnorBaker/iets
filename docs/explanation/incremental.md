@@ -411,6 +411,23 @@ takes as long as the first. The resident checker holds every live graph in
 memory, which the table leaves out: 10.4 GB for the 8 graphs of the first
 commit, and more while kept jobs hold older graphs.
 
+## Snapshot publication
+
+Each complete graph or batch of job traces is staged in a sibling directory and
+published with one rename. Use a new or empty destination. A populated destination
+is refused and kept intact. An empty job batch contains a hidden `.empty` marker;
+enumerate numeric job filenames, and require that marker before treating no numeric
+files as a completed empty batch. Open the directory after successful capture.
+Use distinct, nonoverlapping output paths, discard failed invocations, and do not
+remove or replace published directories while readers use them. Outputs publish
+independently; the protocol provides namespace atomicity, not crash durability.
+
+The combined producer uses graph generation `FTR2` while preserving the separate
+attribute-order flag and name encoding. Its cumulative job/run terminal generation
+is v3; regenerate older graphs and flat traces. Region tables remain V2 and change
+streams remain V3. This generation certifies serial recording and staged immutable
+publication in addition to the cumulative observation guarantees below.
+
 ## Limits
 
 - Recording disables the IR cache and uses one worker even when more are
@@ -446,8 +463,8 @@ The scripts of the measurements are in `bench/incremental/`. They expect a
 clone of nixpkgs at `~/incr/nixpkgs`, a worktree of it at `~/incr/base`, and
 the full evaluation of each commit in `~/incr/drvs/`.
 
-This local cumulative research format uses one `job-trace-cumulative-v2`
-footer for the admitted producer semantics. `run-trace-cumulative-v2` names
+This local cumulative research format uses one `job-trace-cumulative-v3`
+footer for the admitted producer semantics. `run-trace-cumulative-v3` names
 the aggregate channel. Standalone formats require re-recording. Names and
 changes retain their lossless V2 encoding, nodes retain the attribute-order
 flag, and roots are published last. Fine capture always runs on one worker. Regenerate v1 captures, including

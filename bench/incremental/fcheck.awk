@@ -45,7 +45,7 @@ job == "" || $1 == "J" {
   failed = 1; exit
 }
 $0 == "B" && !started { started = 1; next }
-$0 == "V\tjob-trace-cumulative-v2" && started && !complete { complete = 1; next }
+$0 == "V\tjob-trace-cumulative-v3" && started && !complete { complete = 1; next }
 !started || complete || $0 == "B" || /^V/ { print "invalid fine job trace for " job > "/dev/stderr"; failed = 1; next }
 $1 == "R" && $2 == "?" { for (s in step) inv[s] = "untracked " $3; next }
 $1 == "E" || $1 == "Q" || $1 == "I" || $1 == "TreeMtime" { for (s in step) inv[s] = "external read " $1; next }

@@ -35,6 +35,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::{env, iter, ptr, thread};
 
+use tempfile::Builder;
+
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, ConstOrigin, Ir, IrRef, LambdaIr, LetIr, NO_LIT,
     ParamIr, SelectIr,
@@ -67,7 +69,7 @@ const STALE: u32 = u32::MAX;
 const ROOTS_FOOTER: &str = "# list-control-v1\n";
 // The second word was reserved. Old graphs cannot tell which jobs observed
 // symbol order, so require them to be recorded again.
-const TRACE_FORMAT: u32 = u32::from_le_bytes(*b"FTR1");
+const TRACE_FORMAT: u32 = u32::from_le_bytes(*b"FTR2");
 const ATTR_ORDER_SEEN: u32 = 1 << 31;
 
 static ON: AtomicBool = AtomicBool::new(false);
@@ -1792,7 +1794,7 @@ impl State {
     /// `roots` (the trace of each job, a line each).
     fn write_dag(&self, ev: &Evaluator, dir: &Path, roots: &[u32]) -> io::Result<()> {
         fs::create_dir_all(dir)?;
-        // Invalidate a previous capture before replacing any graph components.
+        // Keep the roots completion record last within the unpublished stage.
         let mut roots_file = File::create(dir.join("roots"))?;
         let mut o = String::new();
         for id in 0..self.obs.len() as u32 {
@@ -1934,6 +1936,32 @@ fn roots(s: &mut State, v: Word) -> Vec<u32> {
         .collect()
 }
 
+/// Publish a complete capture to a new or empty destination. Renaming a sibling
+/// directory also refuses a populated destination won by another recorder.
+fn publish_capture(dir: &Path, write: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    let parent = dir.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut builder = Builder::new();
+    match fs::read_dir(dir) {
+        Ok(mut entries) => {
+            if entries.next().transpose()?.is_some() {
+                return Err(io::Error::new(
+                    ErrorKind::DirectoryNotEmpty,
+                    "use a new or empty directory for the fine capture",
+                ));
+            }
+            builder.permissions(fs::metadata(dir)?.permissions());
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let stage = builder.tempdir_in(parent)?;
+    write(stage.path())?;
+    fs::rename(stage.path(), dir)?;
+    let _ = stage.keep();
+    Ok(())
+}
+
 /// Writes the trace of the whole run to the file `IETS_FINE_TRACE` named.
 /// When `v` is a list, writes the trace of each element to `DIR/INDEX` for
 /// `IETS_FINE_JOBS=DIR`, and the trace graph to `IETS_FINE_DAG=DIR`.
@@ -1954,19 +1982,33 @@ pub fn dump(ev: &Evaluator, v: Option<Word>) -> bool {
         }
         let roots = v.map(|v| roots(s, v)).unwrap_or_default();
         if let Some(dir) = env::var_os("IETS_FINE_JOBS") {
-            for (i, t) in roots.iter().enumerate() {
-                let obs = if *t == 0 {
-                    Vec::new()
-                } else {
-                    s.flatten(&[EDGE | t])
-                };
-                let p = Path::new(&dir).join(i.to_string());
-                check(&p, fs::write(&p, s.text(ev, &obs, true)));
-            }
+            let path = Path::new(&dir);
+            check(
+                path,
+                publish_capture(path, |stage| {
+                    // An empty batch is still a published snapshot: keep it
+                    // distinguishable from an unused, precreated directory.
+                    if roots.is_empty() {
+                        fs::write(stage.join(".empty"), [])?;
+                    }
+                    for (i, t) in roots.iter().enumerate() {
+                        let obs = if *t == 0 {
+                            Vec::new()
+                        } else {
+                            s.flatten(&[EDGE | t])
+                        };
+                        fs::write(stage.join(i.to_string()), s.text(ev, &obs, true))?;
+                    }
+                    Ok(())
+                }),
+            );
         }
         if let Some(dir) = env::var_os("IETS_FINE_DAG") {
             let path = Path::new(&dir);
-            check(path, s.write_dag(ev, path, &roots));
+            check(
+                path,
+                publish_capture(path, |stage| s.write_dag(ev, stage, &roots)),
+            );
         }
         errln!(
             "fine trace: {} frames, {} words of traces, {} observations, {} provenances",
@@ -2189,13 +2231,13 @@ fn require_stable_attr_order(dir: &str) -> io::Result<()> {
     Ok(())
 }
 
-const TRACE_VERSION: &str = "V\tjob-trace-cumulative-v2\n";
+const TRACE_VERSION: &str = "V\tjob-trace-cumulative-v3\n";
 
 fn write_trace_version(out: &mut String, job: bool) {
     out.push_str(if job {
         TRACE_VERSION
     } else {
-        "V\trun-trace-cumulative-v2\n"
+        "V\trun-trace-cumulative-v3\n"
     });
 }
 
