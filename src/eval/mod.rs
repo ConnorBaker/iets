@@ -1242,8 +1242,11 @@ impl Evaluator {
         {
             return Ok(src.to_vec());
         }
-        match store_hooks::resolve(self, resolved).read(self, false) {
+        match store_hooks::resolve(self, resolved).read_import(self) {
             Ok(s) => Ok(s),
+            Err((_, e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Err(Error::boxed(ErrorKind::Io, e.to_string(), pos))
+            }
             Err((_, e)) => bail!(
                 ErrorKind::Io,
                 pos,

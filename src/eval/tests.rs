@@ -214,6 +214,28 @@ fn equality() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn short_sysfs_reads_fail_for_import_read_file_and_hash_file() {
+    let path = "/sys/kernel/uevent_seqnum";
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    if bytes.len() as u64 >= std::fs::metadata(path).unwrap().len() {
+        return;
+    }
+    for expression in [
+        format!("import {path}"),
+        format!("builtins.readFile {path}"),
+        format!("builtins.hashFile \"sha256\" {path}"),
+    ] {
+        assert_eq!(
+            eval_err(&format!("builtins.tryEval ({expression})")),
+            format!("unexpected end-of-file reading from {path:?}")
+        );
+    }
+}
+
+#[test]
 fn try_eval_and_errors() {
     assert_eq!(
         eval_str("(builtins.tryEval (throw \"x\")).success"),
