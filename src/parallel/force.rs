@@ -865,6 +865,8 @@ fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parallel::try_run;
+    use crate::print::print_ambiguous;
 
     #[test]
     fn coercion_walk_stops_cancelled_helper() {
@@ -887,14 +889,13 @@ mod tests {
     fn a_mapped_entry_and_its_inputs_become_visible_on_demand() {
         fn render(ev: &mut Evaluator, value: Word) -> String {
             let mut out = Vec::new();
-            crate::print::print_ambiguous(ev, value, 1, &mut out, &mut FxHashSet::default(), 0)
-                .unwrap();
+            print_ambiguous(ev, value, 1, &mut out, &mut FxHashSet::default(), 0).unwrap();
             String::from_utf8(out).unwrap()
         }
         for (mapper, input_after) in [("v: v", "{ a = 2; }"), ("v: 2", "{ a = <CODE>; }")] {
             for nested in [false, true] {
                 let (mapped_before, input_before, result, mapped_after, source_after) =
-                    crate::parallel::try_run(2, Evaluator::new(), move |ev| {
+                    try_run(2, Evaluator::new(), move |ev| {
                         let expr = format!(
                             "let s = {{ a = builtins.length [ 0 0 ]; }};
                              m = builtins.mapAttrs (_: {mapper}) s;
