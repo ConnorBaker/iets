@@ -49,6 +49,9 @@ fn attr_order_invalidates_the_comparison(#[case] earlier_import: bool, #[case] e
         cmd.args(["eval", "--strict", "--no-cache", "--workers", "1"])
             .arg(&root);
         if trace {
+            if dag.exists() {
+                fs::remove_dir_all(&dag).unwrap();
+            }
             cmd.env("IETS_FINE_TRACE", "").env("IETS_FINE_DAG", &dag);
         }
         stdout(&ok(&mut cmd))
@@ -97,6 +100,9 @@ fn subset_replay_reports_order_dependence() {
     let dag = dir.join("dag");
     let root = dir.join("jobs.nix");
     let run = |jobs| {
+        if dag.exists() {
+            fs::remove_dir_all(&dag).unwrap();
+        }
         fs::write(&root, jobs).unwrap();
         stdout(&ok(iets
             .cmd()

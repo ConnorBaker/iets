@@ -120,6 +120,9 @@ fn volatile_selection_and_nested_json_reach_their_consumers() {
         ),
         ("[ { time=builtins.currentTime; } 7 ]", &[0][..]),
     ] {
+        if graph.exists() {
+            fs::remove_dir_all(&graph).unwrap();
+        }
         fs::write(&root, expr).unwrap();
         ok(bin
             .cmd()
