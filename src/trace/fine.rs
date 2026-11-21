@@ -21,11 +21,11 @@
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
-use std::io;
 use std::panic::Location;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
+use std::{fs, io};
 
 use crate::compile::ir::{
     AttrElemIr, AttrsIr, BindIr, BindScope, Ir, IrRef, LambdaIr, LetIr, NO_LIT, ParamIr, SelectIr,
@@ -1774,7 +1774,7 @@ fn bit(s: u8) -> u128 {
 impl Changes {
     /// `step\tCHANGE...` lines, as `fchg.sh` writes them.
     fn read(file: &str) -> io::Result<Changes> {
-        let text = std::fs::read_to_string(file)?;
+        let text = fs::read_to_string(file)?;
         let uint = |s: &str| {
             s.parse::<u32>()
                 .ok()
