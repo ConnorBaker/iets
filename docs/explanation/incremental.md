@@ -21,7 +21,7 @@ and one merge in ten invalidated all of them.
 
 ## What the prototype records
 
-`IETS_FINE_TRACE` turns the trace on, at one worker and without the IR cache.
+To record a trace, set `IETS_FINE_TRACE` and pass `--workers 1`.
 
 | observation | made when | invalid when |
 |---|---|---|
@@ -412,7 +412,9 @@ commit, and more while kept jobs hold older graphs.
 
 ## Limits
 
-- The trace runs at one worker, without the IR cache.
+- Recording disables the IR cache and uses one worker even when more are
+  requested. Before serial recording was enforced, two jobs reading the same
+  thunk could lose the second job's dependency. Regenerate those captures.
 - The job list of a commit comes from its full evaluation, not from an
   enumeration, and jobs that fail are left out.
 - The thresholds (8 bindings, one region per binding) were not tuned.

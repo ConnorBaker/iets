@@ -39,7 +39,11 @@ function flush(   s) {
   }
   delete inv; delete pc; complete = started = 0
 }
-$1 == "J" { flush(); job = $2; next }
+$1 == "J" && NF == 2 && $2 != "" { flush(); job = $2; next }
+job == "" || $1 == "J" {
+  print "expected a job header at " FILENAME ":" FNR > "/dev/stderr"
+  failed = 1; exit
+}
 $0 == "B" && !started { started = 1; next }
 $0 == "V\tjob-trace-cumulative-v2" && started && !complete { complete = 1; next }
 !started || complete || $0 == "B" || /^V/ { print "invalid fine job trace for " job > "/dev/stderr"; failed = 1; next }
