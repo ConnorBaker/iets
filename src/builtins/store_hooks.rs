@@ -566,16 +566,21 @@ impl SrcPath {
     fn read_with(&self, ev: &Evaluator, mode: ReadMode) -> Result<Vec<u8>, Failed> {
         match self.at().ok_or((STAT, enoent()))? {
             At::Disk(p) => {
-                let (meta, f) = if mode == ReadMode::FileBuiltin {
-                    let meta = fs::metadata(os(&p)).map_err(|e| (STAT, e))?;
-                    if !meta.is_file() {
+                let path = os(&p);
+                let f = if mode == ReadMode::FileBuiltin {
+                    // Reject devices before opening them. The path may change before open.
+                    if !fs::metadata(&path).map_err(|e| (STAT, e))?.is_file() {
                         return Err((STAT, errno::is_a_directory()));
                     }
-                    (meta, fs::File::open(os(&p)).map_err(|e| (READ, e))?)
+                    sys::fs::open_nonblocking(&path)
                 } else {
-                    let f = fs::File::open(os(&p)).map_err(|e| (READ, e))?;
-                    (f.metadata().map_err(|e| (STAT, e))?, f)
-                };
+                    fs::File::open(&path)
+                }
+                .map_err(|e| (READ, e))?;
+                let meta = f.metadata().map_err(|e| (STAT, e))?;
+                if mode == ReadMode::FileBuiltin && !meta.is_file() {
+                    return Err((STAT, errno::is_a_directory()));
+                }
                 // Imports can also read streams, including completion's FIFO.
                 let sized = mode != ReadMode::Transport && meta.is_file();
                 let bytes =
