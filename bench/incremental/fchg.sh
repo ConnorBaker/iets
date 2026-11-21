@@ -29,7 +29,10 @@ cs=($(git log --first-parent --format=%h --reverse 9dbd131e6c65~1..4e63084a455b)
 pairs() { for ((i = 1; i < ${#cs[@]}; i++)); do echo "$i ${cs[i-1]} ${cs[i]}"; done; echo "w100 ${cs[0]} ${cs[100]}"; for ((i = 10; i <= 100; i += 10)); do echo "w10-$i ${cs[i-10]} ${cs[i]}"; done; }
 pairs | while read -r n a b; do
   out=../fchg/$n.txt
-  if [[ -s $out ]] && grep -Fqx $'V\t3' "$out"; then continue; fi
+  receipt=../fchg/.all-imports-$a-$b
+  if [[ -s $out && $out -ef $receipt ]] && grep -Fqx $'V\t3' "$out"; then continue; fi
+  staged=$(mktemp ../fchg/.changes.XXXXXXXX)
+  trap 'rm -f -- "$staged"' EXIT
   {
     printf 'V\t3\n'
     git diff --no-renames --name-status -z "$a" "$b" | while IFS= read -r -d '' st && IFS= read -r -d '' p; do
@@ -67,7 +70,7 @@ pairs | while read -r n a b; do
         path_change CS "$P/$p"
         ;;
       esac
-      if [[ $p == *.nix && $st != A ]]; then
+      if [[ $st != A ]]; then
         git show "$a:$p" > "$T/a.nix"
         "$I" fine-regions "$T/a.nix=$P/$p" > "$T/a.tab"
         if [[ $st == D ]]; then
@@ -78,10 +81,16 @@ pairs | while read -r n a b; do
         fi
         field "$P/$p"
         gawk -f ../fcmp.awk "$T/a.tab" "$T/b.tab"
-        if [[ $st == D ]]; then d=1; else d=$( { cmp "$T/a.nix" "$T/b.nix" 2>/dev/null || :; } | gawk '{print $5 + 0}'); fi
-        if [[ -n $d ]]; then printf 'CX\t%s\t%d\n' "$encoded" "$((d - 1))"; fi
+        if [[ $st == D ]]; then
+          printf 'CX\t%s\t0\n' "$encoded"
+        elif ! cmp -s "$T/a.nix" "$T/b.nix"; then
+          # Prefix-only differences have no offset in cmp's stdout.
+          d=$(cd "$T"; { cmp a.nix b.nix 2>/dev/null || :; } | gawk '$5 ~ /^[0-9]+,?$/ {print $5 + 0}')
+          printf 'CX\t%s\t%d\n' "$encoded" "$((${d:-1} - 1))"
+        fi
       fi
     done
-  } | sort -u > "$out.tmp"
-  mv "$out.tmp" "$out"
+  } | sort -u > "$staged"
+  ln -f -- "$staged" "$receipt"
+  mv -f -- "$staged" "$out"
 done

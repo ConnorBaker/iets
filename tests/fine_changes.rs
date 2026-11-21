@@ -107,7 +107,11 @@ fn text_checker_routes_each_name_in_a_directory_change() {
     let file = dir.path().join("changes");
     fs::write(&file, "step\tV\t3\nstep\tCD\t/repo\tfirst second\n").unwrap();
     let trace = dir.path().join("trace");
-    fs::write(&trace, "J\tobserved\nB\nP\t0\tdir\t/repo\nK\t0\tsecond\nV\tjob-trace-cumulative-v3\n").unwrap();
+    fs::write(
+        &trace,
+        "J\tobserved\nB\nP\t0\tdir\t/repo\nK\t0\tsecond\nV\tjob-trace-cumulative-v3\n",
+    )
+    .unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/incremental/fcheck.awk");
     let result = ok(Command::new("awk")
         .arg("-f")
