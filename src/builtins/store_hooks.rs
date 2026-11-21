@@ -23,6 +23,8 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 use crate::sys::errno;
 use crate::sys::{self, OsStrExt, OsStringExt};
@@ -410,10 +412,7 @@ fn read_failure(error: io::Error, file: &fs::File, name: &[u8]) -> Failed {
         return (READ, error);
     }
     #[cfg(target_os = "linux")]
-    let path = {
-        use std::os::fd::AsRawFd;
-        fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
-    };
+    let path = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()));
     #[cfg(not(target_os = "linux"))]
     let path = {
         let _ = file;
@@ -577,11 +576,10 @@ impl SrcPath {
                     let f = fs::File::open(os(&p)).map_err(|e| (READ, e))?;
                     (f.metadata().map_err(|e| (STAT, e))?, f)
                 };
-                if mode == ReadMode::Import && !meta.is_file() {
-                    return Err((STAT, errno::is_a_directory()));
-                }
-                let bytes = read_disk(&f, meta.len(), mode != ReadMode::Transport)
-                    .map_err(|e| read_failure(e, &f, &p))?;
+                // Imports can also read streams, including completion's FIFO.
+                let sized = mode != ReadMode::Transport && meta.is_file();
+                let bytes =
+                    read_disk(&f, meta.len(), sized).map_err(|e| read_failure(e, &f, &p))?;
                 ev.trace().file(&p, &meta, &bytes);
                 Ok(bytes)
             }

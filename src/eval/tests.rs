@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
+use std::fs;
 
 use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
@@ -217,10 +219,10 @@ fn equality() {
 #[cfg(target_os = "linux")]
 fn short_sysfs_reads_fail_for_import_read_file_and_hash_file() {
     let path = "/sys/kernel/uevent_seqnum";
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(bytes) = fs::read(path) else {
         return;
     };
-    if bytes.len() as u64 >= std::fs::metadata(path).unwrap().len() {
+    if bytes.len() as u64 >= fs::metadata(path).unwrap().len() {
         return;
     }
     for expression in [

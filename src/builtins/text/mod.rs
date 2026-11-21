@@ -9,6 +9,7 @@ mod xml;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
+use std::io;
 use std::rc::Rc;
 use std::time::{self, SystemTime};
 use std::{env, str};
@@ -339,7 +340,7 @@ fn hash_file(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     coerce::read_through_copy(ev, &path, pos)?;
     let data = match at.read(ev, true) {
         Ok(d) => d,
-        Err((_, e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+        Err((_, e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
             return Err(Error::boxed(ErrorKind::Io, e.to_string(), pos));
         }
         Err((_, e)) => bail!(
