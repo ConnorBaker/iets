@@ -833,8 +833,10 @@ fn walk_fp(
         let mut entries = read_dir_kinds(path)?;
         entries.sort();
         let parent_len = rel.len();
+        let mut child = PathBuf::new();
         for (name, ekind) in entries {
-            let child = path.join(OsStr::from_bytes(&name));
+            path.clone_into(&mut child);
+            child.push(OsStr::from_bytes(&name));
             rel.push(b'/');
             rel.extend_from_slice(&name);
             hash_tree_entry(seen_h, rel, ekind);
