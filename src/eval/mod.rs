@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::str::from_utf8;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use std::{fs, mem, ptr};
+use std::{fs, io, mem, ptr};
 
 pub use error::{Error, ErrorKind, EvalResult, Pos};
 
@@ -1263,8 +1263,11 @@ impl Evaluator {
         {
             return Ok(src.to_vec());
         }
-        match store_hooks::resolve(self, resolved).read(self, false) {
+        match store_hooks::resolve(self, resolved).read_import(self) {
             Ok(s) => Ok(s),
+            Err((_, e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                Err(Error::boxed(ErrorKind::Io, e.to_string(), pos))
+            }
             Err((_, e)) => bail!(
                 ErrorKind::Io,
                 pos,
