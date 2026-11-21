@@ -33,7 +33,7 @@ fn capture(cmd: &mut Command, dir: &Path) -> String {
 
 fn changed(bin: &Iets, dir: &Path) -> String {
     // A validation step with no changed source files.
-    fs::write(dir.join("delta"), "r\tV\t2\n").unwrap();
+    fs::write(dir.join("delta"), "r\tV\t3\n").unwrap();
     stdout(&ok(bin.cmd().current_dir(dir).args([
         "fine-check",
         "delta",

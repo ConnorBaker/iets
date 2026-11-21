@@ -35,7 +35,7 @@ fn caught_shared_failure_invalidates_every_reader(bin: Iets) {
     assert_eq!(stdout(&ok(&mut eval())), "[true,true,7]");
     fs::write(
         path("delta"),
-        format!("s\tV\t2\ns\tCM\t{}\n", path("flag").display()),
+        format!("s\tV\t3\ns\tCM\t{}\n", path("flag").display()),
     )
     .unwrap();
     let checked = stdout(&ok(bin.cmd().current_dir(dir.path()).args([

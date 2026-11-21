@@ -16,7 +16,7 @@ fn uncacheable_forces_reach_job_graphs_and_flat_traces() {
     let jobs = root.join("jobs");
     fs::create_dir(&jobs).unwrap();
     let delta = root.join("changes");
-    fs::write(&delta, "1\tV\t2\n1\tCM\t/unrelated\n").unwrap();
+    fs::write(&delta, "1\tV\t3\n1\tCM\t/unrelated\n").unwrap();
     let runner = bin();
     fn suspects(output: &str) -> Vec<usize> {
         output

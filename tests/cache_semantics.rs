@@ -970,7 +970,7 @@ fn fine_cutoffs_preserve_introspection(work: Work) {
     assert_eq!(eval(&expr, false), "[ false false 3 true true true ]");
     assert_eq!(eval(&projection, false), fingerprint);
 
-    work.write("changes", &format!("1\tV\t2\n1\tCR\t{switch}\t\n"));
+    work.write("changes", &format!("1\tV\t3\n1\tCR\t{switch}\t\n"));
     let check = || {
         let mut server = work
             .iets()
@@ -1049,7 +1049,7 @@ fn nested_job_output(
     assert_eq!(eval.stdout, expected.as_bytes());
 
     for (file, jobs) in [(&a, a_jobs), (&b, b_jobs)] {
-        let changes = work.write("changes", &format!("1\tV\t2\n1\tCR\t{file}\t\n"));
+        let changes = work.write("changes", &format!("1\tV\t3\n1\tCR\t{file}\t\n"));
         let check = work
             .iets()
             .args(["fine-check", &changes, &dag])
@@ -1085,7 +1085,7 @@ fn json_jobs_share_a_path_copy_trace(work: Work) {
     assert_eq!(output[0], output[1]["nested"]);
     work.write(
         "changes",
-        &format!("1\tV\t2\n1\tCT\t{}\n", work.s("payload")),
+        &format!("1\tV\t3\n1\tCT\t{}\n", work.s("payload")),
     );
     let commands = work.write("server", "load dag 0\ncheck changes checked\n");
     let server = work

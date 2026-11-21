@@ -57,7 +57,7 @@ fn fine_check_tracks_the_selected_list_and_each_element(bin: Iets) {
         .iter()
         .map(|name| {
             let file = String::from_utf8(path_to_internal(&path(name))).unwrap();
-            format!("{name}\tV\t2\n{name}\tCR\t{file}\t\n")
+            format!("{name}\tV\t3\n{name}\tCR\t{file}\t\n")
         })
         .collect();
     fs::write(path("changes"), changes).unwrap();
@@ -91,7 +91,7 @@ fn fine_check_rejects_graphs_without_list_control_traces(bin: Iets) {
         ]));
     // The old format for an immediate element with no cell trace.
     fs::write(path("dag/roots"), "0\n").unwrap();
-    fs::write(path("changes"), "1\tV\t2\n").unwrap();
+    fs::write(path("changes"), "1\tV\t3\n").unwrap();
     let checked = bin
         .cmd()
         .current_dir(dir.path())
@@ -139,7 +139,7 @@ fn fine_text_checker_requires_regeneration_only_for_incomplete_jobs(bin: Iets) {
         ]));
     let current = fs::read_to_string(path("jobs/0")).unwrap();
     let (legacy, _) = current.rsplit_once("V\t").unwrap();
-    fs::write(path("changes"), "1\tV\t2\n1\tCR\tunrelated\t\n").unwrap();
+    fs::write(path("changes"), "1\tV\t3\n1\tCR\tunrelated\t\n").unwrap();
     fs::write(
         path("traces"),
         format!("J\tcurrent\n{current}J\tlegacy\n{legacy}"),

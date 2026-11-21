@@ -61,7 +61,7 @@ fn attr_order_invalidates_the_comparison(#[case] earlier_import: bool, #[case] e
     fs::write(
         &changes,
         format!(
-            "1\tV\t2\n1\tCM\t{}\n1\tCT\t{}\n1\tCX\t{}\t0\n",
+            "1\tV\t3\n1\tCM\t{}\n1\tCT\t{}\n1\tCX\t{}\t0\n",
             file.display(),
             file.display(),
             file.display()

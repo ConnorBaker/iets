@@ -91,7 +91,7 @@ fn symlink_reads_invalidate_only_their_consumers() {
     fs::write(
         &delta,
         format!(
-            "1\tV\t2\n1\tCM\t{}\n1\tCM\t{}\n1\tCS\t{}\n1\tCD\t{}\tadded\n1\tCT\t{}\n",
+            "1\tV\t3\n1\tCM\t{}\n1\tCM\t{}\n1\tCS\t{}\n1\tCD\t{}\tadded\n1\tCT\t{}\n",
             target.display(),
             real.join("added").display(),
             real.join("added").display(),
@@ -165,7 +165,7 @@ fn replacing_an_ordinary_ancestor_wakes_a_previously_missing_lookup() {
     );
     fs::write(
         root.join("delta"),
-        format!("1\tV\t2\n1\tCM\t{}\n", root.join("dir").display()),
+        format!("1\tV\t3\n1\tCM\t{}\n", root.join("dir").display()),
     )
     .unwrap();
     assert_eq!(dirty(&check(&runner, &root), 1), [0, 1, 2]);
@@ -199,7 +199,7 @@ fn an_intermediate_retarget_changes_the_import_and_tree() {
     assert_eq!(old[2], fresh[2]);
     fs::write(
         root.join("delta"),
-        format!("1\tV\t2\n1\tCM\t{}\n", root.join("inner").display()),
+        format!("1\tV\t3\n1\tCM\t{}\n", root.join("inner").display()),
     )
     .unwrap();
     assert_eq!(dirty(&check(&runner, &root), 1), [0, 1]);

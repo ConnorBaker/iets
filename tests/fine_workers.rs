@@ -34,7 +34,7 @@ fn records_both_jobs_reading_a_shared_thunk(bin: Iets, #[case] workers: &str) {
     assert_eq!(stdout(&ok(&mut eval())), r#"["new","new"]"#);
     fs::write(
         file("delta"),
-        format!("s\tV\t2\ns\tCM\t{}\n", file("payload").display()),
+        format!("s\tV\t3\ns\tCM\t{}\n", file("payload").display()),
     )
     .unwrap();
     let checked = stdout(&ok(bin

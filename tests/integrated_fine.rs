@@ -78,7 +78,7 @@ fn chooser_alias_membership_and_nested_render_demands() {
         )
         .unwrap();
         let mut changes = format!(
-            "r\tV\t2\nr\tCM\t{}\nr\tCT\t{}\nr\tCX\t{}\t0\n",
+            "r\tV\t3\nr\tCM\t{}\nr\tCT\t{}\nr\tCX\t{}\t0\n",
             file.display(),
             file.display(),
             file.display()
@@ -112,7 +112,7 @@ fn volatile_selection_and_nested_json_reach_their_consumers() {
     let graph = tmp.path().join("graph");
     let changes = tmp.path().join("changes");
     let bin = bin();
-    fs::write(&changes, "r\tV\t2\n").unwrap();
+    fs::write(&changes, "r\tV\t3\n").unwrap();
     for (expr, expected) in [
         (
             "if builtins.currentTime > 0 then [ 1 2 ] else [ 3 4 ]",
