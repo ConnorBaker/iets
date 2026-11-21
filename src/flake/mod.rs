@@ -379,12 +379,12 @@ fn load_flake(ev: &mut Evaluator, fr: &FlakeRef, top: bool) -> EvalResult<Word> 
     let call_flake = ev.eval(root_env, ir)?;
     let lock_str = ev.mk_string(&lock_bytes);
     let dir_w = ev.mk_string(subdir.as_bytes());
-    let mut ov = vec![
+    let mut ov = [
         (ev.sym(b"sourceInfo"), pos, source_info),
         (ev.sym(b"dir"), pos, dir_w),
     ];
     let ov = ev.mk_attrs(&mut ov, pos)?;
-    let mut overrides = vec![(ev.sym(lock.root.as_bytes()), pos, ov)];
+    let mut overrides = [(ev.sym(lock.root.as_bytes()), pos, ov)];
     let overrides = ev.mk_attrs(&mut overrides, pos)?;
     // its own primop, not the one in `builtins`: in classic mode that
     // one is there only with `fetch-tree` or `flakes` (`builtins::exposed`),
