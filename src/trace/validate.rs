@@ -307,6 +307,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_proc_stream_and_a_sized_read_observe_different_bytes() {
+        use crate::sys::fs::symlink;
+
         let proc = Path::new("/proc/version");
         let Ok(bytes) = fs::read(proc) else { return };
         if bytes.len() as u64 <= fs::metadata(proc).unwrap().len() {
@@ -321,7 +323,7 @@ mod tests {
         let mut obs = trace.take();
 
         fs::remove_file(&path).unwrap();
-        std::os::unix::fs::symlink(proc, &path).unwrap();
+        symlink(proc, &path).unwrap();
         assert!(validate(&mut obs, 1).is_err());
 
         trace.file(native, &fs::metadata(&path).unwrap(), &bytes);
