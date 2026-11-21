@@ -295,6 +295,8 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
 mod tests {
     use super::super::{Trace, sha256};
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::sys::fs::symlink;
     use tempfile::tempdir;
 
     use std::time::{self, Duration, SystemTime};
@@ -307,8 +309,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_proc_stream_and_a_sized_read_observe_different_bytes() {
-        use crate::sys::fs::symlink;
-
         let proc = Path::new("/proc/version");
         let Ok(bytes) = fs::read(proc) else { return };
         if bytes.len() as u64 <= fs::metadata(proc).unwrap().len() {
