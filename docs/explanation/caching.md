@@ -165,20 +165,18 @@ Every primop that looks at the world records one observation.
 
 | observation | recorded by | validated by |
 |---|---|---|
-| a file's size, mtime, ctime, device, inode and sha256 | `import`, `readFile`, `hashFile`, every `.drv` read | `lstat`; on a stat mismatch the file is rehashed and accepted if the hash matches |
+| a file's size, mtime, ctime, device, inode and sha256 | `import`, `readFile`, `hashFile`, every `.drv` read | `lstat`; read the current bytes and compare their hash |
 | a directory listing's hash | `readDir` | re-list and rehash |
 | a path's kind | `pathExists`, `readFileType`, the `default.nix` probe, every search-path candidate, every marker the SCM detection probed above a flake directory, a fetched store path that the store has as valid | re-stat |
-| a copied tree's NAR hash and stat hash | `./path` coerced to a string, `builtins.path`, `filterSource`, a flake's working tree, a `path:` input | recompute the stat hash with `lstat` only; on a mismatch re-dump the NAR with the recorded filter and compare. A `path:` input also records its newest mtime, which the evaluation sees as `lastModified`, and the same bytes with another date are a change |
+| a copied tree's NAR hash and stat hash | `./path` coerced to a string, `builtins.path`, `filterSource`, a flake's working tree, a `path:` input | re-dump the NAR with the recorded filter and compare its hash; writing through a shared file mapping can leave every stat field unchanged. A `path:` input also records its newest mtime, which the evaluation sees as `lastModified`, and the same bytes with another date are a change |
 | a resolved symlink | `storePath`, `builtins.path` and `filterSource` when canonicalizing changed the path | canonicalize again |
 | a host import's source path | `import` and `scopedImport` | a regular file's content check uses `lstat` to check the final component too. For a symlink, follow its chain again and compare the path used to resolve relative imports |
 | an environment variable, as a keyed hash | `getEnv`; `HOME` when a `~/` literal is compiled | read it again and hash it again |
 | which query of which SCM was asked in which directory, and its exit status and output | the queries of the SCM that read a flake working tree or a repository; for git, `ls-files`, `status`, `rev-parse HEAD`, `show-ref --head` for a `ref`, and `config core.attributesFile` for `export-ignore` | ask the same query again, rehash |
 
 On Linux, a later write through an already dirty shared memory mapping can
-change file contents without changing the size, mtime or ctime. A tracing
-cache hit can then replay an old file value or the old store path of a tree
-containing that file. If an input can change this way, run
-`iets eval --no-tracing-cache` to read it again. The IR cache can stay on.
+change file contents without changing the size, mtime or ctime. The tracing
+cache checks the current file digest or filtered tree NAR before replay.
 
 What follows from an observation is not itself an observation. The date
 and the count of a revision follow from the revision, because a commit is
