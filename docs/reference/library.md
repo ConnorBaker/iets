@@ -97,7 +97,9 @@ session's memory (`Session::heap`). Nothing in it is freed while the session
 lives. All of it is freed when the last handle goes: your `Arc<Session>`,
 and each `Evaluator` made in the session. A `parallel::try_run` holds the
 session only until it returns. The fallback session lives as long as the
-process.
+process. The slices from `Interner::name` and `Interner::name_str`
+borrow the interner handle. Use `to_vec()` or `to_owned()` to keep a name
+after dropping that handle.
 
 A `Value<'e>` borrows its evaluator, so the compiler stops you from keeping
 one too long. A `runtime::Word` from `api::evaluate`, and an error that
@@ -146,10 +148,13 @@ Methods on `Eval` may evaluate, intern a name or allocate.
 
 - A getter on a value that is not forced yet reports `ValueKind::Thunk`
   and returns `None`. It never panics and never forces, so force first.
-- `as_bytes`, `as_path` and the attribute names borrow the arena without
-  copying, and the getters on `Value` never allocate. The constructors copy:
+- `as_bytes` and `as_path` borrow the arena without copying, and the
+  getters on `Value` never allocate. The constructors copy:
   `string` and `path` copy their bytes in, and `list` and `attrs` gather a
   temporary first.
+- The name returned by `attr_at` borrows the `Eval` handle.
+  To collect names across calls, copy each with `name.to_vec()` as in
+  `examples/value.rs`. The returned child keeps its original value lifetime.
 - `attr_at` uses the evaluator's internal order, as `nix_get_attr_byidx`
   warns. Sort the names yourself when the order must be reproducible. On the
   result of `//`, the first `attr_at` flattens the union, which copies it

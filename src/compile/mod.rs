@@ -269,9 +269,9 @@ impl<'a> Compiler<'a> {
 
     /// A reference to the global `name` (a bare name, or the `x` of
     /// `builtins.x`): the `currentTime` half of `impure-builtin`.
-    fn global_ref(&mut self, name: &[u8], pos: Pos) -> CResult<()> {
+    fn global_ref(&mut self, sym: Sym, pos: Pos) -> CResult<()> {
         if self.lint_on(LintId::ImpureBuiltin)
-            && let Some(msg) = lint::purity::current_time(name)
+            && let Some(msg) = lint::purity::current_time(self.interner.name(sym))
         {
             self.lint(LintId::ImpureBuiltin, pos, || msg)?;
         }
@@ -370,7 +370,7 @@ impl<'a> Compiler<'a> {
                     Some(Ir::WithVar { sym, withs, .. }) => Ir::WithVar { sym, withs, pos },
                     Some(ir) => {
                         if matches!(ir, Ir::Const(_)) {
-                            self.global_ref(self.interner.name(sym), pos)?;
+                            self.global_ref(sym, pos)?;
                         }
                         ir
                     }
@@ -394,7 +394,7 @@ impl<'a> Compiler<'a> {
                     && self.lexical_lookup(*s).is_none()
                     && let Some(AttrElem::Static(first)) = path.first()
                 {
-                    self.global_ref(self.interner.name(*first), pos)?;
+                    self.global_ref(*first, pos)?;
                 }
                 if let Some(folded) = self.fold_builtins_select(*subject, path, default.is_none()) {
                     return Ok(folded);
@@ -1183,7 +1183,7 @@ impl<'a> Compiler<'a> {
             Some(Ir::WithVar { sym, withs, .. }) => Ok(self.alloc(Ir::WithVar { sym, withs, pos })),
             Some(ir) => {
                 if matches!(ir, Ir::Const(_)) {
-                    self.global_ref(self.interner.name(var), pos)?;
+                    self.global_ref(var, pos)?;
                 }
                 Ok(self.alloc(ir))
             }

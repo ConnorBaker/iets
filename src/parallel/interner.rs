@@ -63,7 +63,7 @@ fn hash_bytes(b: &[u8]) -> u64 {
     h.finish()
 }
 
-struct Inner {
+pub(crate) struct Names {
     shards: Vec<RwLock<HashMap<&'static [u8], Sym, MixBuild>>>,
     /// `names[id]` points at a name in `heap`. Written once,
     /// before the id is published through a shard.
@@ -77,7 +77,20 @@ struct Inner {
     heap: Arc<Heap>,
 }
 
-impl Drop for Inner {
+impl Names {
+    pub(crate) fn name(&self, s: Sym) -> &[u8] {
+        assert!((s.0 as usize) < MAX_SYMS);
+        // SAFETY: ids come from `intern`, whose entry store happened before
+        // the id was published.
+        unsafe {
+            let p = (*self.names.add(s.0 as usize)).load(Ordering::Acquire);
+            assert!(!p.is_null(), "unknown symbol {}", s.0);
+            *p
+        }
+    }
+}
+
+impl Drop for Names {
     fn drop(&mut self) {
         unmap_per_sym(self.names);
         unmap_per_sym(self.prefixes);
@@ -86,8 +99,8 @@ impl Drop for Inner {
 
 // SAFETY: the name table is append-only; each entry is written once with
 // Release before its id escapes and read with Acquire.
-unsafe impl Sync for Inner {}
-unsafe impl Send for Inner {}
+unsafe impl Sync for Names {}
+unsafe impl Send for Names {}
 
 /// Per-handle direct-mapped lookup cache in front of the shared table:
 /// a hit costs one hash and one compare, no lock.
@@ -107,7 +120,7 @@ pub struct CacheEntry {
 }
 
 pub struct Interner {
-    shared: Arc<Inner>,
+    shared: Arc<Names>,
     cache: Box<[CacheEntry]>,
 }
 
@@ -177,7 +190,7 @@ impl Interner {
     pub fn in_heap(heap: Arc<Heap>) -> Interner {
         let names = per_sym();
         Interner {
-            shared: Arc::new(Inner {
+            shared: Arc::new(Names {
                 shards: (0..SHARDS)
                     .map(|_| RwLock::new(HashMap::with_hasher(MixBuild::default())))
                     .collect(),
@@ -262,15 +275,18 @@ impl Interner {
             .copied()
     }
 
-    pub fn name(&self, s: Sym) -> &'static [u8] {
-        assert!((s.0 as usize) < MAX_SYMS);
-        // SAFETY: ids come from `intern`, whose entry store happened before
-        // the id was published.
-        unsafe {
-            let p = (*self.shared.names.add(s.0 as usize)).load(Ordering::Acquire);
-            assert!(!p.is_null(), "unknown symbol {}", s.0);
-            *p
-        }
+    /// The name borrows this handle.
+    /// ```compile_fail
+    /// let mut names = iets::syntax::symbol::Interner::default();
+    /// let sym = names.intern(b"attribute");
+    /// let name: &'static [u8] = names.name(sym);
+    /// ```
+    pub fn name(&self, s: Sym) -> &[u8] {
+        self.shared.name(s)
+    }
+
+    pub(crate) fn names(&self) -> Arc<Names> {
+        self.shared.clone()
     }
 
     /// The order of names by bytes, as far as their first 8 bytes decide
@@ -283,7 +299,7 @@ impl Interner {
         unsafe { (*self.shared.prefixes.add(s.0 as usize)).load(Ordering::Relaxed) }
     }
 
-    pub fn name_str(&self, s: Sym) -> &'static str {
+    pub fn name_str(&self, s: Sym) -> &str {
         from_utf8(self.name(s)).unwrap_or("<non-utf8>")
     }
 

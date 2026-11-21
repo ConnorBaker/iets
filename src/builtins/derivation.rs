@@ -524,11 +524,12 @@ fn derivation_strict_internal(
         lint_owner,
     };
 
+    let names = ev.interner.names();
     for attr in lexicographic_order(ev, attrs) {
         if attr.sym == s.ignore_nulls {
             continue;
         }
-        let key = str::from_utf8(ev.interner.name(attr.sym))
+        let key = str::from_utf8(names.name(attr.sym))
             .map_err(|_| Error::boxed(ErrorKind::Eval, "string is not valid UTF-8", pos))?;
         let before = b.context.len();
         process_attr(ev, &mut b, attr.sym, key, attr.cell.get(), pos, attr.pos).map_err(

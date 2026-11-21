@@ -14,7 +14,7 @@ pub enum Tree<'a> {
     Node(&'static str, Span, Vec<(&'static str, Tree<'a>)>),
     List(Vec<Tree<'a>>),
     Text(&'a [u8]),
-    Name(&'static str),
+    Name(&'a str),
     Int(i64),
     Float(f64),
     Bool(bool),

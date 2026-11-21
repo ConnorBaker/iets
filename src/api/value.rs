@@ -260,7 +260,7 @@ impl<'e> Eval<'e> {
 
     /// Attribute `i` in the set's own order: its name and its unforced
     /// value. The order is not alphabetical (docs/reference/library.md).
-    pub fn attr_at(&mut self, v: Value<'e>, i: usize) -> EvalResult<Option<(&'e [u8], Value<'e>)>> {
+    pub fn attr_at(&mut self, v: Value<'e>, i: usize) -> EvalResult<Option<(&[u8], Value<'e>)>> {
         let a = self.ev.force_attrs(v.w, Pos::NONE, WHERE)?;
         // `//` keeps both sides; index order needs the merged copy
         let a = if a.is_union() {
@@ -448,7 +448,7 @@ mod tests {
             assert_eq!(v.attrs_len(), Some(2));
             assert!(e.attr(v, b"c").unwrap().is_none());
             let mut names: Vec<_> = (0..2)
-                .map(|i| e.attr_at(v, i).unwrap().unwrap().0)
+                .map(|i| e.attr_at(v, i).unwrap().unwrap().0.to_vec())
                 .collect();
             names.sort();
             assert_eq!(names, vec![&b"a"[..], &b"b"[..]]);
