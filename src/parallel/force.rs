@@ -243,6 +243,13 @@ fn read_speculated(ev: &mut Evaluator, cell: &Cell, st: Word) {
 
 #[inline(never)]
 fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult<Word> {
+    // A packed map stores its value in the public attribute cell. Computing it
+    // ahead would expose that cell before demand. Let the demand path also
+    // force the exact inputs the mapper reads.
+    if !ev.par.is_main && w.thunk_kind() == Kind::ThunkMap {
+        ev.par.cancelled = true;
+        return Err(cancelled());
+    }
     let me = ev.par.id;
     let key = cell as *const Cell as u64;
     // SAFETY (every `slot_mut` below): this fiber owns its slot, and each
@@ -313,23 +320,10 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
     match r {
         Ok(v) => {
             debug_assert!(!v.is_thunk());
-            // A packed map entry cannot hold both a speculative mark and
-            // its function result. Retry on demand so enclosing thunks never
-            // publish a comparison using a fresh function on each force.
-            if spec && w.thunk_kind() == Kind::ThunkMap && v.is_function() {
-                ev.par.cancelled = true;
-            }
             if ev.par.cancelled {
                 ev.par.fx.0.truncate(mark);
                 thunk::publish(unsafe { slot_mut(ev) }, cell, payload);
                 Err(cancelled())
-            } else if w.thunk_kind() == Kind::ThunkMap && ev.par.fx.0.len() > mark {
-                // Publishing into the map entry would expose pending effects.
-                if ev.par.frames == 0 {
-                    ev.par.fx.0.truncate(mark);
-                }
-                thunk::publish(unsafe { slot_mut(ev) }, cell, payload);
-                Ok(v)
             } else {
                 let mut done = w.thunk_finish(v, ev.par.is_main);
                 if ev.par.fx.0.len() > mark {
@@ -910,6 +904,56 @@ mod tests {
         let mut ev = Evaluator::new();
         assert!(coerce_walk(&mut ev, Word::TRUE, 64));
         assert!(!coerce_walk(&mut ev, Word::TRUE, 65));
+    }
+
+    #[test]
+    fn a_mapped_entry_and_its_inputs_become_visible_on_demand() {
+        fn render(ev: &mut Evaluator, value: Word) -> String {
+            let mut out = Vec::new();
+            crate::print::print_ambiguous(ev, value, 1, &mut out, &mut FxHashSet::default(), 0)
+                .unwrap();
+            String::from_utf8(out).unwrap()
+        }
+        for (mapper, input_after) in [("v: v", "{ a = 2; }"), ("v: 2", "{ a = <CODE>; }")] {
+            for nested in [false, true] {
+                let (mapped_before, input_before, result, mapped_after, source_after) =
+                    crate::parallel::try_run(2, Evaluator::new(), move |ev| {
+                        let expr = format!(
+                            "let s = {{ a = builtins.length [ 0 0 ]; }};
+                             m = builtins.mapAttrs (_: {mapper}) s;
+                             in [ m s (builtins.attrValues m) (m.a + 2) ]"
+                        );
+                        let top = ev.eval_string(&expr, b"/").unwrap().as_list().unwrap();
+                        let m = ev.force_cell(&top.cells()[0]).unwrap();
+                        let s = ev.force_cell(&top.cells()[1]).unwrap();
+                        let values = ev.force_cell(&top.cells()[2]).unwrap().as_list().unwrap();
+                        let demand = if nested {
+                            &top.cells()[3]
+                        } else {
+                            &values.cells()[0]
+                        };
+                        // Use the look-ahead scheduler through the exported alias or a
+                        // computation that reads the map. No OS timing assumptions.
+                        ahead(ev, 0..1, |_| demand);
+                        let mapped_before = render(ev, m);
+                        let input_before = render(ev, s);
+                        let result = ev.force_cell(demand).unwrap().imm_int_value();
+                        (
+                            mapped_before,
+                            input_before,
+                            result,
+                            render(ev, m),
+                            render(ev, s),
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(mapped_before, "{ a = <CODE>; }");
+                assert_eq!(input_before, "{ a = <CODE>; }");
+                assert_eq!(result, if nested { 4 } else { 2 });
+                assert_eq!(mapped_after, "{ a = 2; }");
+                assert_eq!(source_after, input_after);
+            }
+        }
     }
 }
 
