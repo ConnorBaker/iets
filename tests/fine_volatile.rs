@@ -112,6 +112,21 @@ fn uncacheable_forces_reach_job_graphs_and_flat_traces() {
     assert!(!text_check(&flat_file).status.success());
     let obs = graph.join("obs");
     let recorded = fs::read_to_string(&obs).unwrap();
+    // The graph version must be its own final line, not a suffix of a torn
+    // observation. Test both the transition checker and inspection reader.
+    let end = "V\tjob-trace-cumulative-v3\n";
+    let body = recorded.strip_suffix(end).unwrap();
+    fs::write(&obs, format!("{}{end}", body.trim_end_matches('\n'))).unwrap();
+    for inspection in [false, true] {
+        let mut cmd = runner.cmd();
+        cmd.arg("fine-check");
+        if inspection {
+            cmd.args(["--job", "0"]);
+        } else {
+            cmd.arg(&delta);
+        }
+        assert!(!cmd.arg(&graph).output().unwrap().status.success());
+    }
     fs::write(&obs, recorded.replace("V\tjob-trace-cumulative-v3\n", "")).unwrap();
     assert!(
         !runner
