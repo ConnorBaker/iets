@@ -9,19 +9,24 @@ function init_ascii(    i, c) {
   }
 }
 FILENAME == ARGV[1] {
+  # gawk exposes the record terminator through RT.
+  if (NF < 3 || $1 == "" || $3 == "" || ("version" in PROCINFO && RT == "")) bad_change()
   s = $1
   step[s] = 1
-  if ($2 == "V" && $3 == "3") version[s] = 1
-  else if ($2 == "CR") cr[$3 "\t" $4] = cr[$3 "\t" $4] " " s
-  else if ($2 == "CF") cf[$3] = cf[$3] " " s
-  else if ($2 == "CL") { cl[$3 "\t" $4 "\t" $5] = cl[$3 "\t" $4 "\t" $5] ";" s ":" $6; n = split($6, x, " "); for (i = 1; i <= n; i++) cn[x[i]] = 1 }
-  else if ($2 == "CD") { cd[$3] = cd[$3] ";" s ":" $4; cn[$4] = 1 }
-  else if ($2 == "CM") cm[$3] = cm[$3] " " s
-  else if ($2 == "CT") ct[$3] = ct[$3] " " s
-  else if ($2 == "CS") cs[$3] = cs[$3] " " s
-  else if ($2 == "CX") cx[$3] = cx[$3] ";" s ":" $4
+  if ($2 == "V" && NF == 3 && $3 == "3") version[s] = 1
+  else if ($2 == "CR" && NF == 4) cr[$3 "\t" $4] = cr[$3 "\t" $4] " " s
+  else if ($2 == "CF" && NF == 3) cf[$3] = cf[$3] " " s
+  else if ($2 == "CL" && NF == 6 && uint($5)) { cl[$3 "\t" $4 "\t" $5] = cl[$3 "\t" $4 "\t" $5] ";" s ":" $6; n = split($6, x, " "); for (i = 1; i <= n; i++) cn[x[i]] = 1 }
+  else if ($2 == "CD" && NF == 4 && $4 != "") { cd[$3] = cd[$3] ";" s ":" $4; cn[$4] = 1; n = split($4, x, " "); for (i = 1; i <= n; i++) cn[x[i]] = 1 }
+  else if ($2 == "CM" && NF == 3) cm[$3] = cm[$3] " " s
+  else if ($2 == "CT" && NF == 3) ct[$3] = ct[$3] " " s
+  else if ($2 == "CS" && NF == 3) cs[$3] = cs[$3] " " s
+  else if ($2 == "CX" && NF == 4 && uint($4)) cx[$3] = cx[$3] ";" s ":" $4
+  else bad_change()
   next
 }
+function bad_change() { print FILENAME ":" FNR ": malformed change record" > "/dev/stderr"; failed = 1; exit 1 }
+function uint(s) { return s ~ /^(0|[1-9][0-9]*)$/ && s + 0 <= 4294967295 }
 function mark(ss, why,    n, x, i) { n = split(ss, x, " "); for (i = 1; i <= n; i++) if (!(x[i] in inv)) inv[x[i]] = why }
 function entries(e, name, why,    n, x, i, y) {
   n = split(e, x, ";")
@@ -92,7 +97,7 @@ $1 == "T" { if ($2 in ct) mark(ct[$2], "T " $2); next }
 $1 == "S" { if ($2 in cs) mark(cs[$2], "S " $2); next }
 $1 == "D" { if ($2 in cd) entries(cd[$2], "", "D " $2); next }
 END {
-  flush()
   for (s in step) if (!(s in version)) { print "regenerate the changes" > "/dev/stderr"; failed = 1; break }
+  if (!failed) flush()
   exit failed
 }

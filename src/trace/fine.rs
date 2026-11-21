@@ -2109,19 +2109,44 @@ impl Changes {
     /// `step\tCHANGE...` lines, as `fchg.sh` writes them.
     fn read(file: &str) -> io::Result<Changes> {
         let text = fs::read_to_string(file)?;
+        let uint = |s: &str| {
+            s.parse::<u32>()
+                .ok()
+                .filter(|_| s == "0" || matches!(s.as_bytes().first(), Some(b'1'..=b'9')))
+        };
         let mut c = Changes::default();
         let mut idx: FxHashMap<String, u8> = FxHashMap::default();
         let mut versioned = FxHashSet::default();
-        for line in text.lines() {
-            let f: Vec<&str> = line.split('\t').collect();
-            if f.len() < 3 {
-                continue;
+        for (i, line) in text.split_inclusive('\n').enumerate() {
+            let invalid = || {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("malformed change record on line {}", i + 1),
+                )
+            };
+            let line = line.strip_suffix('\n').ok_or_else(invalid)?;
+            let f: Vec<&str> = line
+                .strip_suffix('\r')
+                .unwrap_or(line)
+                .split('\t')
+                .collect();
+            if f.len() < 3 || f[0].is_empty() || f[2].is_empty() {
+                return Err(invalid());
             }
-            let s = *idx.entry(f[0].to_string()).or_insert_with(|| {
+            let s = if let Some(&s) = idx.get(f[0]) {
+                s
+            } else {
+                if c.steps.len() == 128 {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "fine-check: at most 128 steps",
+                    ));
+                }
+                let s = c.steps.len() as u8;
                 c.steps.push(f[0].to_string());
-                assert!(c.steps.len() <= 128, "fine-check: at most 128 steps");
-                (c.steps.len() - 1) as u8
-            });
+                idx.insert(f[0].to_string(), s);
+                s
+            };
             let names = |n: &str| {
                 if n == "*" {
                     None
@@ -2143,36 +2168,36 @@ impl Changes {
                 }
                 ("V", _) => {
                     return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                        ErrorKind::InvalidData,
                         "unsupported change format; regenerate the changes",
                     ));
                 }
-                ("CR", 4..) => *c.regions.entry(f[2..4].join("\t")).or_insert(0) |= bit(s),
-                ("CF", _) => or(&mut c.files, f[2]),
-                ("CL", 6..) => c
+                ("CR", 4) => *c.regions.entry(f[2..4].join("\t")).or_insert(0) |= bit(s),
+                ("CF", 3) => or(&mut c.files, f[2]),
+                ("CL", 6) if uint(f[4]).is_some() => c
                     .lits
                     .entry(f[2..5].join("\t"))
                     .or_default()
                     .push((s, names(f[5]))),
-                ("CD", 4..) => c
+                ("CD", 4) if !f[3].is_empty() => c
                     .dirs
                     .entry(f[2].into())
                     .or_default()
                     .push((s, names(f[3]))),
-                ("CM", _) => or(&mut c.modified, f[2]),
-                ("CT", _) => or(&mut c.trees, f[2]),
-                ("CS", _) => or(&mut c.stats, f[2]),
-                ("CX", 4..) => c
+                ("CM", 3) => or(&mut c.modified, f[2]),
+                ("CT", 3) => or(&mut c.trees, f[2]),
+                ("CS", 3) => or(&mut c.stats, f[2]),
+                ("CX", 4) => c
                     .first
                     .entry(f[2].into())
                     .or_default()
-                    .push((s, f[3].parse().unwrap_or(0))),
-                _ => {}
+                    .push((s, uint(f[3]).ok_or_else(invalid)?)),
+                _ => return Err(invalid()),
             }
         }
         if idx.len() != versioned.len() || versioned.is_empty() {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+                ErrorKind::InvalidData,
                 "missing change format; regenerate the changes",
             ));
         }
@@ -3347,6 +3372,9 @@ fn serve() -> i32 {
                 Err(e) => format!("error {file}: {e}\n"),
             },
             ["check", file, dest] => match Changes::read(file) {
+                Ok(c) if c.steps.len() > 1 => {
+                    format!("error {file}: expected changes for one step\n")
+                }
                 Ok(c) => {
                     let res = s.check(&c);
                     let mut o = String::new();
