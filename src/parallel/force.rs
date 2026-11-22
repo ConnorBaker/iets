@@ -525,10 +525,20 @@ fn fanout_batched(ev: &Evaluator, kind: u8, obj: Word, n: usize, batch: u32) {
 }
 
 /// Submit cells `lo..hi` of `obj` as range tasks of `batch` cells.
+/// Disabled parallelism, zero batches and ranges shorter than `MIN_FANOUT` submit no work.
+///
+/// # Panics
+/// For active positive batches: reversed ranges or nontrivial ends above `u32::MAX`.
+/// Invalid containers or visited indices can also panic.
 pub fn fanout_range(ev: &Evaluator, kind: u8, obj: Word, lo: usize, hi: usize, batch: u32) {
-    if !ev.par.on || hi - lo < MIN_FANOUT {
+    if !ev.par.on || batch == 0 {
         return;
     }
+    let count = hi.checked_sub(lo).expect("fanout range is reversed");
+    if count < MIN_FANOUT {
+        return;
+    }
+    let n = u32::try_from(hi).expect("fanout range exceeds 32-bit cell indices");
     // SAFETY: this fiber owns its slot, and the borrow only serves to reach
     // the worker it runs on; nothing else borrows the slot below.
     let slot = unsafe { slot_mut(ev) };
@@ -540,10 +550,9 @@ pub fn fanout_range(ev: &Evaluator, kind: u8, obj: Word, lo: usize, hi: usize, b
             _ => &obj.as_attrs().unwrap().attrs()[i].cell,
         }
     };
-    let n = hi;
     let mut start = lo as u32;
-    while (start as usize) < n {
-        let len = batch.min(n as u32 - start);
+    while start < n {
+        let len = batch.min(n - start);
         let worth = (start..start + len)
             .any(|i| matches!(cell_state(cell(i as usize)), CellState::Unclaimed));
         if worth {
@@ -895,6 +904,7 @@ mod tests {
     use crate::print::print_ambiguous;
     use crate::runtime::PrimFn;
     use crate::session::Session;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::thread;
     use std::time::Duration;
 
@@ -1021,6 +1031,22 @@ mod tests {
                 assert_eq!(source_after, input_after);
             }
         }
+    }
+
+    #[test]
+    fn fanout_range_zero_batch_and_unrepresentable_end() {
+        try_run(2, Evaluator::new(), |ev| {
+            let obj = ev.eval_string("[1 2 3 4]", b"/").unwrap();
+            let obj = ev.force(obj).unwrap();
+            fanout_range(ev, T_LIST_WHNF, obj, 0, 4, 0);
+            if let Ok(hi) = usize::try_from(u64::from(u32::MAX) + 5) {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    fanout_range(ev, T_LIST_WHNF, obj, 0, hi, 4);
+                }));
+                assert!(result.is_err());
+            }
+        })
+        .unwrap();
     }
 }
 
