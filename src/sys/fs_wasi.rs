@@ -9,7 +9,9 @@ use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, UTIME_NOW, futimens, utimensat};
+use rustix::fs::{
+    AtFlags, CWD, Mode, OFlags, Timespec, Timestamps, UTIME_NOW, futimens, open, utimensat,
+};
 use rustix::io::{pread, pwrite};
 
 /// The links a path may pass through, as in Linux's `MAXSYMLINKS`.
@@ -177,6 +179,11 @@ pub fn set_executable(_path: &Path, _executable: bool) -> io::Result<()> {
 
 pub fn copy_mode(_m: &Metadata, _f: &File) -> io::Result<()> {
     Ok(())
+}
+
+/// Open the file through the host's preopened directory with nonblocking I/O.
+pub fn open_nonblocking(path: &Path) -> io::Result<File> {
+    Ok(open(path, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty())?.into())
 }
 
 /// `std` keeps the WASI lookup flags unstable, so this follows a link. The host
