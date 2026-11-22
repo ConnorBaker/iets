@@ -8,6 +8,8 @@ use crate::api::value::Eval;
 use crate::compile::Compiler;
 use crate::lint::{Config, Level};
 use crate::runtime::Value;
+#[cfg(feature = "stats2")]
+use crate::runtime::Word;
 use crate::store::json::normalise_structured_attrs;
 use crate::syntax::{self, ast::FileId};
 use crate::{print, sys};
@@ -1006,5 +1008,40 @@ fn mismatched_path_does_not_register_the_computed_store_path() {
         let error = ev.eval_string(&src, &base).unwrap_err();
         assert!(error.msg.contains("store path mismatch"), "{}", error.msg);
         assert_eq!(ev.known.origins().len(), initial);
+    }
+}
+
+#[cfg(feature = "stats2")]
+#[test]
+fn scope_census_counts_only_preexisting_map_thunks_as_escapes() {
+    for packed in [false, true] {
+        for created_in_scope in [false, true] {
+            let mut ev = Evaluator::new();
+            let f = ev.eval_string("_: _: true", b"/").unwrap();
+            let sym = ev.sym(b"value");
+            // Force the second packed entry so its index is part of the identity.
+            let first = ev.sym(b"type");
+            let src = ev
+                .arena
+                .mk_attrs_sorted(&[(first, Pos::NONE, Word::TRUE), (sym, Pos::NONE, Word::TRUE)]);
+            let start_scope = |ev: &mut Evaluator| {
+                assert!(ev.arena.stats.census.scope_enter(ev.arena.bytes_allocated));
+            };
+            if created_in_scope {
+                start_scope(&mut ev);
+            }
+            let thunk = if packed {
+                let result = ev.arena.mk_map_attrs(f, src.as_attrs().unwrap());
+                result.as_attrs().unwrap().get(sym).unwrap().cell.get()
+            } else {
+                ev.arena.mk_thunk_app2(f, Word::TRUE, Word::TRUE)
+            };
+            if !created_in_scope {
+                start_scope(&mut ev);
+            }
+            assert_eq!(ev.force(thunk).unwrap(), Word::TRUE);
+            let (_, escapes) = ev.arena.stats.census.scope_leave(ev.arena.bytes_allocated);
+            assert_eq!(escapes, u64::from(!created_in_scope), "packed={packed}");
+        }
     }
 }
