@@ -573,7 +573,7 @@ fn print_json_inner(
                     write()
                 };
                 result.map_err(|mut e| {
-                    e.add_trace(pos, format!("while evaluating list element at index {i}"));
+                    e.add_list_trace(pos, i);
                     e
                 })?;
             }
