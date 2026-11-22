@@ -6,7 +6,7 @@ mod hermetic;
 
 use std::cell::Cell;
 use std::collections::HashSet;
-use std::{fs, mem, slice};
+use std::{fs, io, mem, slice};
 
 use iets::api::{build, installable::drv_roots};
 use iets::build::backend::{Backend, Worker};
@@ -23,11 +23,15 @@ fn planned_upload_retries_and_follows_each_batch() {
     let s = store!();
     pin_store_dir(s.store_dir().to_str().unwrap());
     let mut ev = Evaluator::new();
+    let source = s.write("input", "text");
     let file = s.write("roots.nix", r#"let mk = name: src: derivation {
         inherit name src; system = "@SYSTEM@"; builder = "@SHELL@"; args = [ "-c" "echo yes > $out" ];
-    }; in [ (mk "a" (builtins.toFile "src" "text")) (mk "b" "") ]"#);
+    }; in [ (mk "a" ./input) (mk "b" "") ]"#);
     let value = ev
-        .eval_string(&fs::read_to_string(file).unwrap(), b"/")
+        .eval_string(
+            &fs::read_to_string(file).unwrap(),
+            s.dir().as_os_str().as_encoded_bytes(),
+        )
         .unwrap();
     let mut roots = Vec::new();
     drv_roots(&mut ev, value, &mut roots).unwrap();
@@ -49,6 +53,11 @@ fn planned_upload_retries_and_follows_each_batch() {
     let mut d = dispatch();
     let mut upload = PlanUpload::new(&plan, &locate);
     assert!(d.submit(&mut upload, targets()).is_err());
+    fs::remove_file(&source).unwrap();
+    assert!(
+        matches!(d.submit(&mut upload, targets()), Err(Error::Io { context, source }) if context == "daemon connection" && source.kind() == io::ErrorKind::NotFound)
+    );
+    fs::write(&source, "text").unwrap();
     assert!(d.submit(&mut upload, targets()).unwrap()[0].success);
     assert!(d.submit(&mut upload, targets()).unwrap().is_empty());
 
