@@ -113,7 +113,7 @@ pub fn try_run<R: Send + 'static>(
     let user = Box::into_raw(Box::new(ev)) as *mut ();
     let out = Arc::new(Mutex::new(None));
     let put = out.clone();
-    rt.run_main(
+    rt.run(
         user,
         Box::new(move |slot: &mut sched::Slot| {
             // The main fiber reaches its slot through this pointer only, so
@@ -157,6 +157,7 @@ pub fn try_run<R: Send + 'static>(
             }
             *put.lock().unwrap() = Some(r);
         }),
+        true,
     )?;
     Ok(out
         .lock()
