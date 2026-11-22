@@ -685,21 +685,8 @@ fn iets_options_reach_the_workers(bin: Iets) {
 fn worker_requests_only_admitted_children_at_the_chunk_depth(bin: Iets) {
     let input = tempfile::NamedTempFile::new().unwrap();
     fs::write(input.path(), "do []\nexit\n").unwrap();
-    // Both invalid byte strings travel as the same protocol name. Sort by the
-    // original bytes, but hash the name that the collector can request.
-    let expr = r#"let bad = builtins.substring 0 1 "é"; in
-        builtins.listToAttrs (map (name: { inherit name; value = throw "unused"; })
-          [ "c" "Z${bad}" "b" "M" "A${bad}" "a" ])"#;
-    for (chunk, depth, names) in [
-        ("0", "1", vec!["<non-utf8>", "M", "<non-utf8>", "a", "c"]),
-        ("1", "1", vec!["b"]),
-        (
-            "0",
-            "2",
-            vec!["<non-utf8>", "M", "<non-utf8>", "a", "b", "c"],
-        ),
-    ] {
-        let output = ok(ci(&bin)
+    let request = |chunk: &str, depth: &str, expr: &str| {
+        ci(&bin)
             .args([
                 "--worker",
                 "--chunks",
@@ -711,9 +698,38 @@ fn worker_requests_only_admitted_children_at_the_chunk_depth(bin: Iets) {
                 "--expr",
                 expr,
             ])
-            .stdin(File::open(input.path()).unwrap()));
+            .stdin(File::open(input.path()).unwrap())
+            .output()
+            .unwrap()
+    };
+    let expr = r#"builtins.listToAttrs (map (name: { inherit name; value = throw "unused"; })
+          [ "c" "Z" "b" "M" "A" "a" ])"#;
+    for (chunk, depth, names) in [
+        ("0", "1", vec!["A", "M", "a", "c"]),
+        ("1", "1", vec!["Z", "b"]),
+        ("0", "2", vec!["A", "M", "Z", "a", "b", "c"]),
+    ] {
+        let output = request(chunk, depth, expr);
+        assert!(output.status.success(), "{}", stderr(&output));
         let text = str::from_utf8(&output.stdout).unwrap();
         let response: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
         assert_eq!(response["attrs"], serde_json::json!(names));
+    }
+
+    // Reject a reached set before either partition can filter the invalid names.
+    let invalid = r#"let bad = builtins.substring 0 1 "é"; in
+        { "A${bad}" = throw "unused"; "Z${bad}" = throw "unused"; }"#;
+    for chunk in ["0", "1"] {
+        let output = request(chunk, "1", invalid);
+        assert!(!output.status.success());
+        let text = str::from_utf8(&output.stdout).unwrap();
+        let response: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        assert!(
+            response["error"]
+                .as_str()
+                .unwrap()
+                .contains("invalid UTF-8")
+        );
+        assert!(response.get("attrs").is_none());
     }
 }
