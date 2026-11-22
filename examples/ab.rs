@@ -453,7 +453,7 @@ mod ab {
         }
     }
 
-    fn cleanup_error(error: io::Error, stderr: &Path) -> RunError {
+    fn cleanup_error(error: String, stderr: &Path) -> RunError {
         // A surviving process may still write or replace the path. Read only
         // the final snapshot of a regular file, never wait for an EOF.
         let tail = (|| -> io::Result<String> {
@@ -472,14 +472,12 @@ mod ab {
             file.take(meta.len() - start).read_to_end(&mut bytes)?;
             Ok(String::from_utf8_lossy(&bytes).into_owned())
         })();
-        let mut message = format!("cannot stop the processes it left: {error}");
-        if let Ok(text) = tail
-            && !text.is_empty()
-        {
-            message.push_str("\nworkload stderr (tail):\n");
-            message.push_str(&text);
+        match tail {
+            Ok(text) if !text.is_empty() => {
+                RunError::Cleanup(format!("{error}\nworkload stderr (tail):\n{text}"))
+            }
+            _ => RunError::Cleanup(error),
         }
-        RunError::Cleanup(message)
     }
 
     fn run_once(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
@@ -537,7 +535,9 @@ mod ab {
         let ru = unsafe { ru.assume_init() };
         let wall = t0.elapsed().as_secs_f64();
         // the hash thread may never end while a leftover holds stdout open
-        let clean = reap_leftovers(LEFTOVER_LIMIT).map_err(|e| cleanup_error(e, stderr))?;
+        let clean = reap_leftovers(LEFTOVER_LIMIT).map_err(|e| {
+            cleanup_error(format!("cannot stop the processes it left: {e}"), stderr)
+        })?;
         let out = finish_stdout(reading, hasher, KILL_LIMIT)?;
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
@@ -1078,6 +1078,23 @@ mod ab {
             let result = hash_output(b"line\n".as_slice().chain(Broken), finished);
             assert_eq!(result.unwrap_err().to_string(), "broken reader");
             reading.try_recv().unwrap();
+        }
+
+        #[test]
+        fn fatal_cleanup_keeps_its_context_and_only_the_stderr_tail() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("stderr");
+            let message = "cannot stop the processes it left: injected failure";
+            let mut data = b"distant prefix".to_vec();
+            data.extend([b'.'; 4096]);
+            data.extend(b"last line");
+            fs::write(&path, data).unwrap();
+            let RunError::Cleanup(text) = cleanup_error(message.into(), &path) else {
+                panic!("expected fatal cleanup")
+            };
+            assert!(text.starts_with(message));
+            assert!(text.ends_with("last line"));
+            assert!(!text.contains("distant prefix"));
         }
 
         #[test]
