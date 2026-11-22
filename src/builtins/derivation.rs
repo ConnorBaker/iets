@@ -14,6 +14,7 @@ use crate::sys::tmp;
 use super::{Registry, store_hooks};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::{LintId, coerce, purity};
+use crate::parallel::force::require_demand;
 use crate::parallel::shared::SharedMap;
 use crate::print::{json_escape_str, lexicographic_order, print_json};
 use crate::runtime::{AttrsObj, Ctx, Word, split_built};
@@ -220,6 +221,11 @@ fn derivation_strict(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<
         pos,
         "while evaluating the argument passed to builtins.derivationStrict",
     )?;
+    // A requested dump is observable and can fail. Perform it in demand
+    // order, with input coercions still free to run on other workers.
+    if ev.drv.dump_dir.is_some() {
+        require_demand(ev)?;
+    }
     parallel::fanout_attrs_coerce(ev, attrs);
     let Some(name_attr) = attrs.get(ev.s.name) else {
         let mut e = Error::new(
@@ -787,10 +793,6 @@ fn derivation_strict_internal(
         .insert(drv_path.clone(), h);
     ev.drv.nr_derivations += 1;
 
-    // not held back like a warning: the value this derivation is part of
-    // escapes into its cell whether or not the demand path takes the thunk
-    // the helper was forcing, so a dump parked on that thunk is dropped
-    // while the drvPath that names it is returned
     if let Some(dir) = &ev.drv.dump_dir {
         let file = dir.join(drv_path.base_name());
         tmp::replace(&file, |f| f.write_all(&text)).map_err(|e| {
