@@ -364,8 +364,7 @@ mod tests {
         }
     }
 
-    /// `http::redirects_resolve` covers the resolver. This pins that the
-    /// cache counts as a directory.
+    /// Resolve NAR references against the cache URL as a directory.
     #[rstest]
     #[case("nar/x.nar", "https://cache.example/sub/nar/x.nar")]
     #[case("https://nars.example/x.nar", "https://nars.example/x.nar")]
