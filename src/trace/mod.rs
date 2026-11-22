@@ -18,6 +18,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env::var_os;
 use std::ffi::OsStr;
+use std::io::ErrorKind::{NotADirectory, NotFound};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,7 +65,6 @@ impl Kind {
 
     /// Only a missing path or a non-directory ancestor proves absence.
     fn observed(r: &io::Result<fs::Metadata>) -> Result<Kind, &io::Error> {
-        use io::ErrorKind::{NotADirectory, NotFound};
         match r {
             Ok(m) => Ok(Kind::of_file_type(&m.file_type())),
             Err(e) if matches!(e.kind(), NotFound | NotADirectory) => Ok(Kind::Missing),

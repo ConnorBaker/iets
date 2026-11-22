@@ -9,6 +9,7 @@ use hermetic::{Iets, stderr, stdout};
 use rstest::{fixture, rstest};
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -165,7 +166,7 @@ fn absence_does_not_replay_through_a_symlink_loop(work: Work) {
     assert!(check().status.contains("cache: hit"));
 
     fs::remove_file(&parent).unwrap();
-    std::os::unix::fs::symlink("ancestor", &parent).unwrap();
+    symlink("ancestor", &parent).unwrap();
     let r = check();
     assert_ne!(r.rc, 0);
     assert!(r.status.contains("miss ("), "{}", r.status);
