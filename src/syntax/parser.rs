@@ -232,17 +232,13 @@ impl<'a> Parser<'a> {
     /// An operand of a chain, one level below the chain, and its height
     /// from the level of the chain.
     #[inline]
-    fn operand(
-        &mut self,
-        recursive: bool,
-        parse: impl FnOnce(&mut Self) -> R<ExprId>,
-    ) -> R<(ExprId, u32)> {
+    fn operand(&mut self, min_bp: u8, recursive: bool) -> R<(ExprId, u32)> {
         let base = self.depth;
         let outer = self.measure();
-        if recursive || cfg!(target_os = "wasi") {
+        if cfg!(target_os = "wasi") || recursive {
             self.deeper()?;
         }
-        let e = parse(self)?;
+        let e = self.parse_op(min_bp)?;
         self.depth = base;
         let h = self.height();
         self.peak = outer;
@@ -613,7 +609,7 @@ impl<'a> Parser<'a> {
                 let mut acc = lhs;
                 while self.peek().kind == Tok::PipeInto {
                     self.bump();
-                    let (f, hf) = self.operand(false, |p| p.parse_op(0))?;
+                    let (f, hf) = self.operand(0, false)?;
                     h = (h + 1).max(hf);
                     self.tall(h)?;
                     acc = self.make_call(f, acc);
@@ -627,7 +623,7 @@ impl<'a> Parser<'a> {
                 let mut chain = vec![lhs];
                 while self.peek().kind == Tok::PipeFrom {
                     self.bump();
-                    let (f, hf) = self.operand(false, |p| p.parse_op(0))?;
+                    let (f, hf) = self.operand(0, false)?;
                     (top, links) = (top.max(hf), links + 1);
                     h = top + links;
                     self.tall(h)?;
@@ -728,7 +724,7 @@ impl<'a> Parser<'a> {
                 }
                 Some(op) => {
                     let rbp = if assoc == Assoc::Right { bp } else { bp + 1 };
-                    let (rhs, hr) = self.operand(assoc == Assoc::Right, |p| p.parse_op(rbp))?;
+                    let (rhs, hr) = self.operand(rbp, assoc == Assoc::Right)?;
                     h = (h + 1).max(hr);
                     self.add(Expr::Binary { op, lhs, rhs }, start, self.last_end)
                 }
