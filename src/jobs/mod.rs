@@ -922,6 +922,7 @@ mod tests {
 
     #[test]
     fn job_paths_reject_invalid_utf8_without_aliasing_a_literal_name() {
+        let _entered = Session::new().enter();
         let mut ev = Evaluator::new();
         let args = ev.eval_string("{ }", b"/").unwrap();
         configure(
