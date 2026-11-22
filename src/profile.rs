@@ -123,6 +123,7 @@ pub fn primop_frame(pos: Pos, sym: Sym) -> u64 {
 
 /// One fiber's shadow stack. Pushed and popped by the call path, read by
 /// nothing else.
+#[derive(Default)]
 pub struct Stack {
     frames: Vec<u64>,
     /// Avoids a load through the session when the run does not profile.
@@ -135,17 +136,8 @@ pub struct Stack {
 impl Clone for Stack {
     fn clone(&self) -> Stack {
         Stack {
+            frames: Vec::with_capacity(if self.on { 1024 } else { 0 }),
             on: self.on,
-            ..Stack::default()
-        }
-    }
-}
-
-impl Default for Stack {
-    fn default() -> Stack {
-        Stack {
-            frames: Vec::with_capacity(1024),
-            on: false,
         }
     }
 }
@@ -156,8 +148,8 @@ impl Stack {
     pub fn sampling() -> Stack {
         cpu_us_since_sample();
         Stack {
+            frames: Vec::with_capacity(1024),
             on: true,
-            ..Stack::default()
         }
     }
 
@@ -669,6 +661,34 @@ mod tests {
         assert_eq!(f >> 32, 7);
         assert_eq!(f as u32, 3);
         assert_eq!(frame(Pos(7), None) as u32, ANON);
+    }
+
+    #[test]
+    fn an_inactive_stack_and_its_clone_need_no_frame_buffer() {
+        let mut s = Stack::default();
+        assert!(!s.on());
+        assert_eq!(s.frames.capacity(), 0);
+        // Even a caller that enters an inactive stack does not pass its
+        // frames or allocation to a new fiber.
+        s.enter(7);
+        let other = s.clone();
+        assert!(!other.on());
+        assert_eq!(other.depth(), 0);
+        assert_eq!(other.frames.capacity(), 0);
+        assert_eq!(s.depth(), 1);
+    }
+
+    #[test]
+    fn sampling_stacks_reserve_their_own_empty_buffers() {
+        let mut s = Stack::sampling();
+        s.enter(7);
+        let other = s.clone();
+        assert!(other.on());
+        assert!(s.frames.capacity() >= 1024);
+        assert!(other.frames.capacity() >= 1024);
+        assert_eq!(other.depth(), 0);
+        assert_ne!(s.frames.as_ptr(), other.frames.as_ptr());
+        assert_eq!(s.depth(), 1);
     }
 
     #[test]
