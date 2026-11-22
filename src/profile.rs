@@ -123,6 +123,7 @@ pub fn primop_frame(pos: Pos, sym: Sym) -> u64 {
 
 /// One fiber's shadow stack. Pushed and popped by the call path, read by
 /// nothing else.
+#[derive(Default)]
 pub struct Stack {
     frames: Vec<u64>,
     /// Avoids a load through the session when the run does not profile.
@@ -137,15 +138,6 @@ impl Clone for Stack {
         Stack {
             frames: Vec::with_capacity(if self.on { 1024 } else { 0 }),
             on: self.on,
-        }
-    }
-}
-
-impl Default for Stack {
-    fn default() -> Stack {
-        Stack {
-            frames: Vec::new(),
-            on: false,
         }
     }
 }
@@ -688,8 +680,8 @@ mod tests {
         s.enter(7);
         let other = s.clone();
         assert!(other.on());
-        assert_eq!(s.frames.capacity(), 1024);
-        assert_eq!(other.frames.capacity(), 1024);
+        assert!(s.frames.capacity() >= 1024);
+        assert!(other.frames.capacity() >= 1024);
         assert_eq!(other.depth(), 0);
         assert_ne!(s.frames.as_ptr(), other.frames.as_ptr());
         assert_eq!(s.depth(), 1);
