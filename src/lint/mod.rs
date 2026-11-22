@@ -26,6 +26,7 @@ use crate::log::{self, Site};
 use crate::session::Session;
 use crate::syntax::symbol::{FxHashMap, FxHasher};
 use crate::sys;
+use crate::trace::key::Key;
 use crate::{compile, ignored, parallel, project, provenance, settings};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
@@ -620,12 +621,12 @@ impl Config {
 
     /// The fingerprint of the complete lint configuration.
     pub fn key(&self) -> String {
-        let mut key = crate::trace::key::Key::new("lint-config");
+        let mut key = Key::new("lint-config");
         self.add_to_key(&mut key);
         key.finish()
     }
 
-    pub(crate) fn add_to_key(&self, key: &mut crate::trace::key::Key) {
+    pub(crate) fn add_to_key(&self, key: &mut Key) {
         key.field("lint-levels", &self.levels.map(|l| level_char(l) as u8));
         key.field("lint-max-bytes", &self.max_bytes.to_le_bytes());
         key.field("lint-scope", self.scope.name().as_bytes());
