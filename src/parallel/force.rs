@@ -880,7 +880,7 @@ fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
 mod tests {
     use super::*;
 
-    fn to_file_and_probe(ev: &mut Evaluator) -> &'static [Cell] {
+    fn to_file_and_probe(ev: &mut Evaluator, probe: &str) -> &'static [Cell] {
         use crate::store::hash::{HashAlgo, hash_bytes};
         use crate::store::path::make_text_path;
 
@@ -895,7 +895,7 @@ mod tests {
         .unwrap();
         let base = path.base_name();
         let expr = format!(
-            r#"[ (builtins.toFile "{name}" "contents") (builtins.pathExists (builtins.storeDir + "/{base}")) ]"#
+            r#"let target = builtins.storeDir + "/{base}"; in [ (builtins.toFile "{name}" "contents") ({probe}) ]"#
         );
         ev.eval_string(&expr, b"/")
             .unwrap()
@@ -909,7 +909,7 @@ mod tests {
         for pure in [true, false] {
             let ev = crate::eval::EvalConfig::new().pure(pure).build();
             let exists = crate::parallel::try_run(2, ev, |ev| {
-                let cells = to_file_and_probe(ev);
+                let cells = to_file_and_probe(ev, "builtins.pathExists target");
                 ahead(ev, 0..1, |i| &cells[i]);
                 ev.force_cell(&cells[1]).unwrap() == Word::TRUE
             })
@@ -923,7 +923,7 @@ mod tests {
         for pure in [true, false] {
             let ev = crate::eval::EvalConfig::new().pure(pure).build();
             let exists = crate::parallel::try_run(2, ev, |ev| {
-                let cells = to_file_and_probe(ev);
+                let cells = to_file_and_probe(ev, "builtins.pathExists target");
                 ahead(ev, 1..2, |i| &cells[i]);
                 ev.force_cell(&cells[0]).unwrap();
                 ev.force_cell(&cells[1]).unwrap() == Word::TRUE
@@ -931,6 +931,25 @@ mod tests {
             .unwrap();
             assert!(exists, "pure = {pure}");
         }
+    }
+
+    #[test]
+    fn speculative_find_file_observes_the_first_demanded_match() {
+        let ev = crate::eval::EvalConfig::new().pure(false).build();
+        let chose_first = crate::parallel::try_run(2, ev, |ev| {
+            let cells = to_file_and_probe(
+                ev,
+                r#"toString (builtins.findFile [
+                { prefix = "x"; path = target; }
+                { prefix = "x"; path = "/"; }
+            ] "x") == target"#,
+            );
+            ahead(ev, 1..2, |i| &cells[i]);
+            ev.force_cell(&cells[0]).unwrap();
+            ev.force_cell(&cells[1]).unwrap() == Word::TRUE
+        })
+        .unwrap();
+        assert!(chose_first);
     }
 
     #[test]
