@@ -286,15 +286,7 @@ fn print_derivation(
     attrs: &'static AttrsObj,
     out: &mut Vec<u8>,
 ) -> EvalResult<bool> {
-    let Some(t) = attrs.get(ev.s.type_) else {
-        return Ok(false);
-    };
-    let t = ev.force_string(
-        t.cell.get(),
-        Pos::NONE,
-        "while evaluating the 'type' attribute",
-    )?;
-    if t.bytes != b"derivation" {
+    if !ev.has_derivation_type(attrs)? {
         return Ok(false);
     }
     let path = match attrs.get(ev.s.drv_path) {

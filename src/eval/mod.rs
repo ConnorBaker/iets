@@ -1795,6 +1795,19 @@ impl Evaluator {
         }
     }
 
+    /// Installable selection and printing require a string when the tag is present.
+    pub(crate) fn has_derivation_type(&mut self, attrs: &'static AttrsObj) -> EvalResult<bool> {
+        let Some(t) = attrs.get(self.s.type_) else {
+            return Ok(false);
+        };
+        let t = self.force_string(
+            t.cell.get(),
+            Pos::NONE,
+            "while evaluating the 'type' attribute",
+        )?;
+        Ok(t.bytes == b"derivation")
+    }
+
     pub fn mk_string(&mut self, bytes: &[u8]) -> Word {
         self.arena.mk_string(bytes)
     }
