@@ -868,19 +868,20 @@ fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval::EvalConfig;
+    use crate::parallel::try_run;
+    use std::fs;
 
     #[test]
     fn dumping_a_derivation_follows_demand() {
         let dir = tempfile::tempdir().unwrap();
-        let ev = crate::eval::EvalConfig::new()
-            .dump_dir(dir.path().to_owned())
-            .build();
-        let states = crate::parallel::try_run(2, ev, move |ev| {
+        let ev = EvalConfig::new().dump_dir(dir.path().to_owned()).build();
+        let states = try_run(2, ev, move |ev| {
             let state = |ev: &Evaluator| {
                 (
                     ev.drv.hash_cache.lock().unwrap().len(),
                     ev.drv.drvs.lock().len(),
-                    std::fs::read_dir(dir.path()).unwrap().count(),
+                    fs::read_dir(dir.path()).unwrap().count(),
                 )
             };
             let v = ev
