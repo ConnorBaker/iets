@@ -1387,9 +1387,11 @@ impl Arena {
             // fewer than `n` when a worker flattened an operand since the count
             (*p).leaves = leaves.offset_from(tail.add(1).cast()) as u8;
             #[cfg(feature = "stats2")]
-            self.stats
-                .census
-                .note_attrs(p, Stat::AttrsUpd.attrs_origin(), (*p).len_unmarked());
+            self.stats.census.note_attrs(
+                p,
+                Stat::AttrsUpd.attrs_origin(),
+                a.len_unmarked() + b.len_unmarked(),
+            );
             Word::from_ref(&*p)
         }
     }
@@ -1441,8 +1443,6 @@ impl Arena {
             }
         }
         out.len.store(n as u32, Ordering::Relaxed);
-        #[cfg(feature = "stats2")]
-        self.stats.census.shrink_attrs(out.origin, cap, n);
         // SAFETY: nothing was allocated since `out`, and `out` never had
         // more than `n` of its `cap` entries written.
         unsafe { self.shrink_last((cap - n) * size_of::<Attr>(), Stat::AttrsUpd) };
@@ -1712,21 +1712,36 @@ mod tests {
     #[cfg(feature = "stats2")]
     #[test]
     fn union_census_counts_distinct_keys_and_initialized_bytes() {
-        let mut arena = Arena::new();
-        let leaf: Vec<_> = (0..8).map(|i| (i, 0)).collect();
-        let union = build(&mut arena, &[leaf.clone(), leaf]);
-        arena.flat(union);
-        let census = &arena.stats.census;
-        let origin = Stat::AttrsUpd.attrs_origin() as usize;
-        assert_eq!(census.attrs_hist[origin][census::size_bucket(8)], 2);
-        let mut report = String::new();
-        census.report(&mut report);
-        let upd = report
-            .lines()
-            .find(|line| line.trim_start().starts_with("upd:"))
-            .unwrap();
-        let bytes = arena.stats.bytes[Stat::AttrsUpd as usize].to_string();
-        assert_eq!(upd.split_whitespace().nth(1), Some(bytes.as_str()));
+        for n in [2, 8] {
+            let mut arena = Arena::new();
+            let leaf: Vec<_> = (0..n).map(|i| (i, 0)).collect();
+            let attrs = build(&mut arena, &[leaf.clone(), leaf]);
+            assert_eq!(attrs.len_raw(), u32::MAX);
+            arena.flat(attrs);
+            let mut report = String::new();
+            arena.stats.census.report(&mut report);
+            let histogram = report
+                .lines()
+                .find(|line| line.split_whitespace().next() == Some("upd"))
+                .unwrap();
+            assert_eq!(
+                histogram
+                    .split_whitespace()
+                    .nth(census::size_bucket(n as usize) + 1),
+                Some("2")
+            );
+            let origin = Stat::AttrsUpd.attrs_origin() as usize;
+            assert_eq!(
+                arena.stats.census.attrs_hist[origin][census::size_bucket(2 * n as usize)],
+                2
+            );
+            let upd = report
+                .lines()
+                .find(|line| line.trim_start().starts_with("upd:"))
+                .unwrap();
+            let bytes = arena.stats.bytes[Stat::AttrsUpd as usize].to_string();
+            assert_eq!(upd.split_whitespace().nth(1), Some(bytes.as_str()));
+        }
     }
 
     fn observed(a: &'static AttrsObj) -> Vec<(u32, i64)> {
@@ -1769,8 +1784,6 @@ mod tests {
     fn census_queries_preserve_intervening_marks() {
         let mut arena = Arena::new();
         let a = build(&mut arena, &[vec![(1, 1), (3, 3)], vec![(2, 2), (3, 4)]]);
-        // Construction may cache the length for the census; exercise a cold cache.
-        a.len.store(u32::MAX, Ordering::Relaxed);
         assert_eq!(a.len_raw(), u32::MAX);
         assert_eq!(a.flags.load(Ordering::Relaxed), 0);
         let begin = Barrier::new(2);
@@ -1798,8 +1811,6 @@ mod tests {
     fn reporting_unknown_union_does_not_mark_it_used() {
         let mut arena = Arena::new();
         let a = build(&mut arena, &[vec![(1, 1)], vec![(2, 2)]]);
-        // Construction may cache the length for the census; exercise a cold cache.
-        a.len.store(u32::MAX, Ordering::Relaxed);
         assert_eq!(a.len_raw(), u32::MAX);
         let mut first = String::new();
         arena.stats.census.report(&mut first);
