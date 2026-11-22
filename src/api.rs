@@ -580,7 +580,7 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
         "require-sigs",
         conf.str("require-sigs").unwrap_or("").as_bytes(),
     );
-    if !config::reads_built_outputs(&Session::current()) {
+    if !config::reads_built_outputs(cfg.configured_session()) {
         k.field("built-outputs", b"0");
     }
     if needs_cwd {
@@ -620,6 +620,38 @@ mod tests {
             key(off.search_path(vec![(b"x".to_vec(), b"/one".to_vec())]))
         );
         assert_ne!(baseline, key(EvalConfig::new()));
+    }
+
+    #[test]
+    fn the_cache_key_uses_the_configured_ifd_policy() {
+        let session = |allow| {
+            let s = Session::new();
+            let mut c = config::Config::default();
+            c.set(
+                "allow-import-from-derivation",
+                if allow { "true" } else { "false" },
+            );
+            s.nix_conf.set(c).unwrap();
+            s
+        };
+        let sessions = [session(true), session(false)];
+        let mut a = EvalArgs::new();
+        a.input = Some(Input::Expr("1".into()));
+        let keys: Vec<Vec<_>> = sessions
+            .iter()
+            .map(|current| {
+                let _entered = current.enter();
+                sessions
+                    .iter()
+                    .map(|configured| {
+                        let cfg = EvalConfig::new().session(configured.clone());
+                        cache_key(&a, "eval", &cfg, &[]).unwrap().finish()
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_ne!(keys[0][0], keys[0][1]);
+        assert_eq!(keys[0], keys[1]);
     }
 
     /// A URL stays as given; `<name>` on it is unsupported, so a classic
