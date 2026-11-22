@@ -258,72 +258,42 @@ mod ab {
     }
 
     /// Independent of line order, which eval-jobs's workers do not keep.
-    fn hash_output(r: impl Read, eof: mpsc::Sender<io::Result<()>>) -> Option<[u8; 32]> {
-        let mut lines: Vec<[u8; 32]> = Vec::new();
-        for line in BufReader::new(r).split(b'\n') {
-            match line {
-                Ok(line) => lines.push(Sha256::digest(mask_stats(&line)).into()),
-                Err(e) => {
-                    let _ = eof.send(Err(e));
-                    return None;
-                }
-            }
-        }
-        let _ = eof.send(Ok(()));
+    fn hash_output(r: impl Read, finished: mpsc::Sender<()>) -> io::Result<[u8; 32]> {
+        let lines = BufReader::new(r)
+            .split(b'\n')
+            .map(|line| line.map(|l| Sha256::digest(mask_stats(&l)).into()))
+            .collect::<io::Result<Vec<[u8; 32]>>>();
+        // Once reading ends, sorting cannot block on an inherited writer.
+        let _ = finished.send(());
+        let mut lines = lines?;
         lines.sort_unstable();
         let mut h = Sha256::new();
         for l in &lines {
             h.update(l);
         }
-        Some(h.finalize().into())
+        Ok(h.finalize().into())
     }
 
-    fn wait_for_stdout(
-        eof: &mpsc::Receiver<io::Result<()>>,
-        deadline: Instant,
-    ) -> Result<(), RunError> {
-        poll_stdout_until(deadline, |wait| eof.recv_timeout(wait))
-    }
-
-    fn poll_stdout_until(
-        deadline: Instant,
-        mut recv: impl FnMut(Duration) -> Result<io::Result<()>, mpsc::RecvTimeoutError>,
-    ) -> Result<(), RunError> {
-        let mut final_poll = false;
-        loop {
-            // recv_timeout takes a relative duration. Recheck the absolute deadline
-            // so a paused receiver cannot start a second full wait when it resumes.
-            let wait = deadline
-                .saturating_duration_since(Instant::now())
-                .min(REAP_INTERVAL);
-            match recv(wait) {
-                Ok(result) => {
-                    return result
-                        .map_err(|e| RunError::Scenario(format!("read benchmark stdout: {e}")));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
-                // EOF can queue while a timed-out receiver is paused. Check it
-                // once with a zero timeout before reporting the absolute limit.
-                Err(mpsc::RecvTimeoutError::Timeout) if !final_poll => final_poll = true,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(RunError::Cleanup(
-                        "benchmark stdout did not close after the run-on limit".into(),
-                    ));
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(RunError::Cleanup(
-                        "benchmark stdout reader disconnected".into(),
-                    ));
-                }
-            }
+    fn finish_stdout(
+        reading: mpsc::Receiver<()>,
+        hasher: thread::JoinHandle<io::Result<[u8; 32]>>,
+        limit: Duration,
+    ) -> Result<[u8; 32], RunError> {
+        if reading.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
+            return Err(RunError::Cleanup(
+                "benchmark stdout did not reach EOF".into(),
+            ));
         }
+        hasher
+            .join()
+            .expect("the hash thread")
+            .map_err(|e| RunError::Cleanup(format!("read benchmark stdout: {e}")))
     }
 
     /// How long processes a run left behind may go on before they are killed.
     const LEFTOVER_LIMIT: Duration = Duration::from_secs(60);
 
     const KILL_LIMIT: Duration = Duration::from_secs(2);
-    const REAP_INTERVAL: Duration = Duration::from_millis(10);
 
     const COUNTERS: [&str; 5] = [
         "instructions",
@@ -551,8 +521,8 @@ mod ab {
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let pid = child.id() as libc::pid_t;
         let out = child.stdout.take().expect("piped");
-        let (notify_eof, eof) = mpsc::channel();
-        let hasher = thread::spawn(move || hash_output(out, notify_eof));
+        let (finished, reading) = mpsc::channel();
+        let hasher = thread::spawn(move || hash_output(out, finished));
         let mut status = 0;
         let mut ru = MaybeUninit::<libc::rusage>::zeroed();
         // SAFETY: the pid is our child, and wait4 fills the structs it is given.
@@ -567,16 +537,8 @@ mod ab {
         let ru = unsafe { ru.assume_init() };
         let wall = t0.elapsed().as_secs_f64();
         // the hash thread may never end while a leftover holds stdout open
-        let cleanup_deadline = Instant::now() + LEFTOVER_LIMIT + KILL_LIMIT;
         let clean = reap_leftovers(LEFTOVER_LIMIT).map_err(|e| cleanup_error(e, stderr))?;
-        // A process outside our child tree can still hold a pipe writer.
-        // Bound the wait for a writer. A queued EOF is usable immediately,
-        // and sorting the completed output may take longer.
-        wait_for_stdout(&eof, cleanup_deadline)?;
-        let out = hasher
-            .join()
-            .expect("the hash thread")
-            .expect("stdout reached EOF");
+        let out = finish_stdout(reading, hasher, KILL_LIMIT)?;
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
         let counts = counters.as_deref_mut().and_then(counters::read);
@@ -1077,7 +1039,6 @@ mod ab {
 
     #[cfg(test)]
     mod tests {
-        use std::os::unix::net::UnixStream;
         #[cfg(target_os = "linux")]
         use std::sync::Mutex;
 
@@ -1094,50 +1055,29 @@ mod ab {
         }
 
         #[test]
-        fn a_writer_can_outlive_the_child_tree() {
-            let (notify, eof) = mpsc::channel();
-            poll_stdout_until(Instant::now(), |wait| {
-                assert!(wait.is_zero());
-                let result = eof.recv_timeout(wait);
-                if matches!(result, Err(mpsc::RecvTimeoutError::Timeout)) {
-                    notify.send(Ok(())).unwrap();
-                }
-                result
-            })
-            .unwrap();
-
-            let (reader, writer) = UnixStream::pair().unwrap();
-            let (notify, eof) = mpsc::channel();
-            let hasher = thread::spawn(move || hash_output(reader, notify));
+        fn a_writer_outside_the_child_tree_can_keep_stdout_open() {
+            let (reader, writer) = io::pipe().unwrap();
+            let (finished, reading) = mpsc::channel();
+            let hasher = thread::spawn(move || hash_output(reader, finished));
             assert!(matches!(
-                wait_for_stdout(&eof, Instant::now()),
-                Err(RunError::Cleanup(m)) if m == "benchmark stdout did not close after the run-on limit"
+                finish_stdout(reading, hasher, Duration::ZERO),
+                Err(RunError::Cleanup(_))
             ));
             drop(writer);
-            wait_for_stdout(&eof, Instant::now() + Duration::from_secs(10)).unwrap();
-            assert_eq!(
-                hasher.join().unwrap(),
-                Some(<[u8; 32]>::from(Sha256::digest([])))
-            );
         }
 
         #[test]
-        fn stdout_error_after_a_complete_line_is_reported() {
+        fn stdout_read_failure_after_a_complete_line_is_fatal_to_the_digest() {
             struct Broken;
             impl Read for Broken {
                 fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-                    Err(io::Error::other("injected read failure"))
+                    Err(io::Error::other("broken reader"))
                 }
             }
-
-            let reader = b"complete line\n".as_slice().chain(Broken);
-            let (notify, eof) = mpsc::channel();
-            let digest = hash_output(reader, notify);
-            assert!(matches!(
-                wait_for_stdout(&eof, Instant::now()),
-                Err(RunError::Scenario(e)) if e == "read benchmark stdout: injected read failure"
-            ));
-            assert!(digest.is_none());
+            let (finished, reading) = mpsc::channel();
+            let result = hash_output(b"line\n".as_slice().chain(Broken), finished);
+            assert_eq!(result.unwrap_err().to_string(), "broken reader");
+            reading.try_recv().unwrap();
         }
 
         #[test]
