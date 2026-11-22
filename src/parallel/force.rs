@@ -119,6 +119,7 @@ pub unsafe fn init_ctx(ev: &mut Evaluator, slot: *mut Slot) {
         id,
         is_main,
         cancelled: false,
+        requires_demand: false,
         stack_lo,
         frames: 0,
         fx: Log::default(),
@@ -337,7 +338,7 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
             }
         }
         Err(mut e) => {
-            if !ev.par.is_main && e.kind != ErrorKind::Cancelled {
+            if !ev.par.is_main && (e.kind != ErrorKind::Cancelled || ev.par.requires_demand) {
                 slot_ref(ev).runtime().note_failed(key);
                 // The first demand supplies the exception's caller frames.
                 // A speculative tryEval must leave that demand for main.
@@ -401,6 +402,16 @@ pub(crate) fn require_demand(ev: &mut Evaluator) -> EvalResult<()> {
     } else {
         Ok(())
     }
+}
+
+/// A helper cannot perform this operation. Remember the open thunks as
+/// unsuitable for repeated speculation until the demand path takes them.
+pub(crate) fn retry_on_demand(ev: &mut Evaluator) -> Box<Error> {
+    debug_assert!(ev.par.on && !ev.par.is_main);
+    ev.par.cancelled = true;
+    ev.par.requires_demand = true;
+    EFFECT_BAILS.fetch_add(1, Ordering::Relaxed);
+    cancelled()
 }
 
 pub static EFFECT_BAILS: AtomicUsize = AtomicUsize::new(0);
@@ -780,6 +791,7 @@ fn ahead(ev: &mut Evaluator, range: Range<usize>, cell: impl Fn(usize) -> &'stat
     let is_main = mem::replace(&mut ev.par.is_main, false);
     let frames = mem::replace(&mut ev.par.frames, 0);
     let cancelled = ev.par.cancelled;
+    let requires_demand = ev.par.requires_demand;
     let mut seen = FxHashSet::default();
     for i in range {
         if !range_step(ev, cell(i), true, &mut seen) {
@@ -789,6 +801,7 @@ fn ahead(ev: &mut Evaluator, range: Range<usize>, cell: impl Fn(usize) -> &'stat
     ev.par.is_main = is_main;
     ev.par.frames = frames;
     ev.par.cancelled = cancelled;
+    ev.par.requires_demand = requires_demand;
 }
 
 fn run_task(ev: &mut Evaluator, t: Task) {
@@ -909,6 +922,7 @@ mod tests {
     use crate::store::hash::{HashAlgo, hash_bytes};
     use crate::store::nar;
     use crate::store::path::make_text_path;
+    use crate::sys::path_to_internal;
     use crate::{sys, treestore};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::thread;
@@ -1108,6 +1122,45 @@ mod tests {
             })
             .unwrap();
             assert_eq!(observed, (false, true), "{producer}");
+        }
+    }
+
+    #[test]
+    fn dynamic_names_are_interned_in_demand_order() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("97732101"), b"").unwrap();
+        for producer in [
+            "builtins.groupBy toString [ 97732101 97732102 ]",
+            r#"builtins.fromJSON ''{"97732101":0,"97732102":0}''"#,
+            r#"{ "${toString 97732101}"=0; "${toString 97732102}"=0; }"#,
+            r#"builtins.fromTOML ''"97732101"=0''"#,
+            r#"builtins.unsafeGetAttrPos "97732101" {}"#,
+            "builtins.readDir ./.",
+        ] {
+            let expr = r#"
+              let compare = n: builtins.listToAttrs [
+                { name = "97732102"; value = n; }
+                { name = "97732101"; value = throw "compared the other field"; }
+              ];
+              in [ (PRODUCER) (builtins.tryEval (compare 0 == compare 1)).success ]
+            "#
+            .replace("PRODUCER", producer);
+            for demand in [false, true] {
+                let expr = expr.clone();
+                let base = path_to_internal(dir.path());
+                let ev = EvalConfig::new().pure(false).build();
+                let success = try_run(2, ev, move |ev| {
+                    let list = ev.eval_string(&expr, &base).unwrap();
+                    let cells = list.as_list().unwrap().cells();
+                    ahead(ev, 0..1, |i| &cells[i]);
+                    if demand {
+                        ev.force_cell(&cells[0]).unwrap();
+                    }
+                    ev.force_cell(&cells[1]).unwrap() == Word::TRUE
+                })
+                .unwrap();
+                assert_eq!(success, !demand, "producer={producer}, demand={demand}");
+            }
         }
     }
 
