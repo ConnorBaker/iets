@@ -4,9 +4,16 @@
 mod e2e;
 mod hermetic;
 
+use std::sync::Arc;
+
 use e2e::{Store, ok};
+use iets::api::value::Eval;
 use iets::cli::run::{Host, run};
-use iets::store::path::pin_store_dir;
+use iets::env::Env;
+use iets::eval::EvalConfig;
+use iets::session::Session;
+use iets::store::locate::references_of;
+use iets::store::path::{StorePath, pin_store_dir};
 
 #[test]
 fn read_file_uses_the_current_sessions_store() {
@@ -50,4 +57,26 @@ fn read_file_uses_the_current_sessions_store() {
     assert_eq!(read(&first, "dummy://"), "false\n");
     assert_eq!(read(&second, "dummy://"), "false\n");
     assert_eq!(read(&second, &daemon), "true\n");
+
+    // EvalConfig accepts an explicit session without entering it on the caller.
+    let session = |uri: &str| {
+        Session::with_env(Env::isolated().with([("NIX_CONFIG", format!("store = {uri}"))]))
+    };
+    let owner = session(&daemon);
+    let ambient = session("dummy://");
+    let _ambient = ambient.enter();
+    let path = StorePath::parse(&first).unwrap();
+    assert!(references_of(&path).is_empty());
+    {
+        let _owner = owner.enter();
+        assert!(!references_of(&path).is_empty());
+    }
+    let mut ev = EvalConfig::new().session(owner).pure(false).build();
+    let mut eval = Eval::new(&mut ev);
+    for path in [&first, &second] {
+        // The first path is cached in both sessions; the second needs a daemon.
+        let expr = format!("builtins.hasContext (builtins.readFile \"{path}\")");
+        assert_eq!(eval.eval_expr(&expr, b"/").unwrap().as_bool(), Some(true));
+        assert!(Arc::ptr_eq(&Session::current(), &ambient));
+    }
 }
