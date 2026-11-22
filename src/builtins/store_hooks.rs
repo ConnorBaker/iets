@@ -24,6 +24,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 
+use crate::parallel::force::require_demand;
 use crate::sys::errno;
 use crate::sys::{self, OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -637,7 +638,7 @@ pub fn copy_path_to_store(
     }
     // Only the demand path can publish a new origin. Already published
     // entries above remain available to helpers.
-    crate::parallel::force::require_demand(ev)?;
+    require_demand(ev)?;
     // the entry is copied as it is, a link included, from where the links
     // above it lead, under a copied tree too
     confine(ev, path, Follow::Ancestors, pos)?;

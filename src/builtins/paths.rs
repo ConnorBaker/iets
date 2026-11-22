@@ -21,6 +21,7 @@ use crate::compile::canon_path;
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::flake::{self, flakeref};
 use crate::lint::{LintId, coerce, purity};
+use crate::parallel::force::require_demand;
 use crate::runtime::{self, Ctx, Value, Word, ctx_to_arena};
 use crate::source;
 use crate::store::drv::Derivation;
@@ -415,7 +416,7 @@ fn path_exists(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> 
         // An earlier demand can still register this origin. A helper must
         // not memoize its absence and return it after that publication.
         if ev.par.on && unresolved && strip_store_dir(&p).is_some() {
-            crate::parallel::force::require_demand(ev)?;
+            require_demand(ev)?;
         }
         Ok(Word::FALSE)
     };
@@ -596,7 +597,7 @@ fn add_path_inner(
 ) -> EvalResult<StorePath> {
     // A new copy can make a context-free path visible to the evaluator.
     // Stop before hashing or running the user's filter twice.
-    crate::parallel::force::require_demand(ev)?;
+    require_demand(ev)?;
     let name = utf8(name, pos)?;
     let refs = references(ev, in_store);
     coerce::store_path_recopy(ev, path, pos)?;
@@ -944,7 +945,7 @@ fn to_file(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         }
     }
     // Registering this file changes what a later context-free pathExists sees.
-    crate::parallel::force::require_demand(ev)?;
+    require_demand(ev)?;
     let h = hash_bytes(HashAlgo::Sha256, contents.bytes);
     let sp = make_text_path(utf8(name, pos)?, &h, &refs)
         .map_err(|e| Error::boxed(ErrorKind::Eval, e.0, pos))?;
