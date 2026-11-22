@@ -158,7 +158,8 @@ pub struct Census {
     /// and forces of older thunks inside it (each one writes a value
     /// built inside the scope into memory that outlives it).
     pub scope_open: bool,
-    scope_unavailable: bool,
+    /// A parallel scope attempt made this arena's scope metrics incomplete.
+    pub scope_unavailable: bool,
     pub scope_thunks: HashSet<u64>,
     pub scope_escapes: u64,
     pub scope_start: usize,
