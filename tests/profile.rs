@@ -179,10 +179,14 @@ fn a_sequential_import_after_a_parallel_timeline_has_no_worker_slot() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("value.nix");
     fs::write(&file, "42").unwrap();
-    for workers in [2, 1] {
+    for (workers, par_stats) in [(2, 2), (1, 2), (2, 0)] {
         let session = Session::new();
+        let log = dir.path().join("timeline.log");
+        session
+            .log
+            .write_to(Box::new(fs::File::create(&log).unwrap()));
         session.use_settings(Settings {
-            par_stats: 2,
+            par_stats,
             ..Settings::default()
         });
         let ev = EvalConfig::new().pure(false).session(session).build();
@@ -193,5 +197,12 @@ fn a_sequential_import_after_a_parallel_timeline_has_no_worker_slot() {
         })
         .unwrap();
         assert_eq!(value, 42);
+        let log = fs::read_to_string(log).unwrap();
+        let imports = log.lines().filter(|l| l.starts_with("import t=")).count();
+        assert_eq!(
+            imports,
+            usize::from(workers == 2 && par_stats == 2),
+            "{log}"
+        );
     }
 }
