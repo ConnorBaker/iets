@@ -1025,7 +1025,12 @@ fn scope_census_counts_only_preexisting_map_thunks_as_escapes() {
                 .arena
                 .mk_attrs_sorted(&[(first, Pos::NONE, Word::TRUE), (sym, Pos::NONE, Word::TRUE)]);
             let start_scope = |ev: &mut Evaluator| {
-                assert!(ev.arena.stats.census.scope_enter(ev.arena.bytes_allocated));
+                assert!(
+                    ev.arena
+                        .stats
+                        .census
+                        .scope_enter(ev.arena.bytes_allocated, false)
+                );
             };
             if created_in_scope {
                 start_scope(&mut ev);
