@@ -159,8 +159,7 @@ pub fn unpack(bytes: Vec<u8>, dest: &Path) -> Result<PathBuf> {
             clear(&at)?;
             let out = File::create(&at)
                 .map_err(|e| Error::io(format!("cannot write {}", at.display()), e))?;
-            let size = pax.as_ref().map_or_else(|| entry.size(), |s| s.size);
-            spool::expand(&mut entry, pax.as_ref(), &out, 0, size).map_err(|e| {
+            spool::expand(&mut entry, pax, &out, 0).map_err(|e| {
                 Error::io(
                     format!("cannot read '{}' from the tarball", rel.display()),
                     e,
