@@ -674,6 +674,7 @@ fn derivation_strict_internal(
     let trace = ev.trace().clone();
     let mut loader = move |p: &StorePath| load_drv_traced(&trace, p);
     let mut modulo = None;
+    let fixed = output_hash.is_some();
     if let Some(h) = output_hash {
         if outputs.len() != 1 || !outputs.contains("out") {
             bail!(
@@ -771,6 +772,7 @@ fn derivation_strict_internal(
     let drv_path = drv_path.map_err(|e| drv_err(e, pos))?;
     let h = match &modulo {
         Some(inputs) => hash_derivation_modulo_with(&drv, false, inputs),
+        None if fixed => drv.fixed_modulo(),
         None => match input_hashes(ev, &drv) {
             None => hash_derivation_modulo(
                 &drv,

@@ -544,6 +544,32 @@ impl Derivation {
                 .all(|o| matches!(o, DerivationOutput::Fixed { .. }))
     }
 
+    /// Hash a derivation whose outputs are all fixed, independently of its inputs.
+    pub(crate) fn fixed_modulo(&self) -> Result<Arc<DrvHash>, DrvError> {
+        let mut hashes = BTreeMap::new();
+        let mut payload = String::with_capacity(256);
+        for (name, out) in &self.outputs {
+            let DerivationOutput::Fixed { method, hash } = out else {
+                unreachable!()
+            };
+            payload.clear();
+            payload.push_str("fixed:out:");
+            payload.push_str(method.prefix());
+            payload.push_str(hash.algo.name());
+            payload.push(':');
+            base16_encode_into(&mut payload, hash.bytes());
+            payload.push(':');
+            payload.push_str(store_dir());
+            payload.push('/');
+            payload.push_str(self.fixed_output_path(name)?.base_name());
+            hashes.insert(
+                name.clone(),
+                hash_bytes(HashAlgo::Sha256, payload.as_bytes()),
+            );
+        }
+        Ok(Arc::new(DrvHash::new(hashes, DrvHashKind::Regular)))
+    }
+
     /// Mirrors derivations.cc:parseDerivation, both the traditional `Derive(...)`
     /// form and `DrvWithVersion("xp-dyn-drv",...)`.
     pub fn parse(s: &[u8], name: &str) -> Result<Derivation, DrvError> {
@@ -904,28 +930,7 @@ pub fn hash_derivation_modulo(
     loader: &mut DrvLoader<'_>,
 ) -> Result<Arc<DrvHash>, DrvError> {
     if drv.is_fixed() {
-        let mut hashes = BTreeMap::new();
-        let mut payload = String::with_capacity(256);
-        for (name, out) in &drv.outputs {
-            let DerivationOutput::Fixed { method, hash } = out else {
-                unreachable!()
-            };
-            payload.clear();
-            payload.push_str("fixed:out:");
-            payload.push_str(method.prefix());
-            payload.push_str(hash.algo.name());
-            payload.push(':');
-            base16_encode_into(&mut payload, hash.bytes());
-            payload.push(':');
-            payload.push_str(store_dir());
-            payload.push('/');
-            payload.push_str(drv.fixed_output_path(name)?.base_name());
-            hashes.insert(
-                name.clone(),
-                hash_bytes(HashAlgo::Sha256, payload.as_bytes()),
-            );
-        }
-        return Ok(Arc::new(DrvHash::new(hashes, DrvHashKind::Regular)));
+        return drv.fixed_modulo();
     }
 
     let inputs = modulo_inputs(drv, cache, loader)?;
