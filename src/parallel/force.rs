@@ -881,11 +881,15 @@ fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval::EvalConfig;
+    use crate::parallel::try_run;
+    use crate::sys::path_to_internal;
+    use std::fs;
 
     #[test]
     fn dynamic_names_are_interned_in_demand_order() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("97732101"), b"").unwrap();
+        fs::write(dir.path().join("97732101"), b"").unwrap();
         for producer in [
             "builtins.groupBy toString [ 97732101 97732102 ]",
             r#"builtins.fromJSON ''{"97732101":0,"97732102":0}''"#,
@@ -904,9 +908,9 @@ mod tests {
             .replace("PRODUCER", producer);
             for demand in [false, true] {
                 let expr = expr.clone();
-                let base = crate::sys::path_to_internal(dir.path());
-                let ev = crate::eval::EvalConfig::new().pure(false).build();
-                let success = crate::parallel::try_run(2, ev, move |ev| {
+                let base = path_to_internal(dir.path());
+                let ev = EvalConfig::new().pure(false).build();
+                let success = try_run(2, ev, move |ev| {
                     let list = ev.eval_string(&expr, &base).unwrap();
                     let cells = list.as_list().unwrap().cells();
                     ahead(ev, 0..1, |i| &cells[i]);
