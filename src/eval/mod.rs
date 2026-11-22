@@ -1578,26 +1578,31 @@ impl Evaluator {
                     return Ok(());
                 }
                 for attr in a.iter() {
-                    let v = self.force_cell(&attr.cell).map_err(|mut e| {
-                        e.add_trace(
-                            attr.pos,
-                            format!(
-                                "while evaluating the attribute '{}'",
-                                self.interner.name_str(attr.sym)
-                            ),
-                        );
-                        e
-                    })?;
-                    self.force_deep_inner(v, seen)?;
+                    self.force_cell(&attr.cell)
+                        .and_then(|v| self.force_deep_inner(v, seen))
+                        .map_err(|mut e| {
+                            e.add_trace(
+                                attr.pos,
+                                format!(
+                                    "while evaluating the attribute '{}'",
+                                    self.interner.name_str(attr.sym)
+                                ),
+                            );
+                            e
+                        })?;
                 }
             }
             Value::List(l) => {
                 if !seen.insert(w.bits()) {
                     return Ok(());
                 }
-                for c in l.cells() {
-                    let v = self.force_cell(c)?;
-                    self.force_deep_inner(v, seen)?;
+                for (i, c) in l.cells().iter().enumerate() {
+                    self.force_cell(c)
+                        .and_then(|v| self.force_deep_inner(v, seen))
+                        .map_err(|mut e| {
+                            e.add_list_trace(Pos::NONE, i);
+                            e
+                        })?;
                 }
             }
             _ => {}

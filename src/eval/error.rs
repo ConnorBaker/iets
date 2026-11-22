@@ -175,6 +175,13 @@ impl Error {
         }
     }
 
+    pub(crate) fn add_list_trace(&mut self, pos: Pos, index: usize) {
+        self.add_trace(
+            pos,
+            format!("while evaluating list element at index {index}"),
+        );
+    }
+
     /// Errors that `tryEval` turns into `{ success = false; }`.
     pub fn is_catchable(&self) -> bool {
         matches!(self.kind, ErrorKind::Throw | ErrorKind::Assert)
