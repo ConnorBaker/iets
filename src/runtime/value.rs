@@ -1509,7 +1509,12 @@ impl Arena {
         }
         for (i, a) in src.attrs_raw().iter().enumerate() {
             // SAFETY: exclusive access to the fresh set during the fill.
-            unsafe { (*out).init(i, a.sym, a.pos, Word::thunk_map_from_ref(&*desc, i)) };
+            unsafe {
+                let w = Word::thunk_map_from_ref(&*desc, i);
+                (*out).init(i, a.sym, a.pos, w);
+                #[cfg(feature = "stats2")]
+                self.stats.census.note_thunk_created(w.bits());
+            }
         }
         Word::from_ref(out_ref)
     }

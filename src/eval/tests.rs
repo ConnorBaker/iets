@@ -792,3 +792,40 @@ fn selection_stops_before_later_names_and_forces_the_final_value(
     let src = r#"builtins.tryEval ((throw "subject").${builtins.abort "name"})"#;
     assert_eq!(eval_str(src), "{ success = false; value = false; }");
 }
+
+#[cfg(feature = "stats2")]
+#[test]
+fn scope_census_counts_only_preexisting_map_thunks_as_escapes() {
+    use crate::runtime::Word;
+
+    for packed in [false, true] {
+        for created_in_scope in [false, true] {
+            let mut ev = Evaluator::new();
+            let f = ev.eval_string("_: _: true", b"/").unwrap();
+            let sym = ev.sym(b"value");
+            // Force the second packed entry so its index is part of the identity.
+            let first = ev.sym(b"type");
+            let src = ev
+                .arena
+                .mk_attrs_sorted(&[(first, Pos::NONE, Word::TRUE), (sym, Pos::NONE, Word::TRUE)]);
+            let start_scope = |ev: &mut Evaluator| {
+                assert!(ev.arena.stats.census.scope_enter(ev.arena.bytes_allocated));
+            };
+            if created_in_scope {
+                start_scope(&mut ev);
+            }
+            let thunk = if packed {
+                let result = ev.arena.mk_map_attrs(f, src.as_attrs().unwrap());
+                result.as_attrs().unwrap().get(sym).unwrap().cell.get()
+            } else {
+                ev.arena.mk_thunk_app2(f, Word::TRUE, Word::TRUE)
+            };
+            if !created_in_scope {
+                start_scope(&mut ev);
+            }
+            assert_eq!(ev.force(thunk).unwrap(), Word::TRUE);
+            let (_, escapes) = ev.arena.stats.census.scope_leave(ev.arena.bytes_allocated);
+            assert_eq!(escapes, u64::from(!created_in_scope), "packed={packed}");
+        }
+    }
+}
