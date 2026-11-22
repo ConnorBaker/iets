@@ -16,7 +16,6 @@ use std::{env, fs, io, thread};
 
 use e2e::{Store, daemon_ready, ok, stderr, stdout};
 use iets::remote::worker::{Connection, Transport};
-use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, bind, listen, socket};
 use serde_json::Value;
 
 /// The shared case, with an executable and a symlink in the tree too.
@@ -578,12 +577,12 @@ fn daemon_readiness_requires_a_listener() {
         .unwrap();
     let path = dir.path().join("socket");
     assert!(!daemon_ready(&path));
-    let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
-    bind(&fd, &SocketAddrUnix::new(&path).unwrap()).unwrap();
+    let socket = tokio::net::UnixSocket::new_stream().unwrap();
+    socket.bind(&path).unwrap();
     assert!(path.exists());
     assert!(!daemon_ready(&path));
-    listen(&fd, 1).unwrap();
+    rustix::net::listen(&socket, 1).unwrap();
     assert!(daemon_ready(&path));
-    drop(fd);
+    drop(socket);
     assert!(!daemon_ready(&path));
 }
