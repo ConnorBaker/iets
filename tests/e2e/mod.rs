@@ -48,6 +48,17 @@ pub(super) fn daemon_ready(socket: &Path) -> bool {
     UnixStream::connect(socket).is_ok()
 }
 
+/// Initialize this store before the listener probe and the first client
+/// can start two daemon workers racing to create the same database.
+fn initialized_daemon(daemon: &Path, configure: impl Fn(&mut Command)) -> Command {
+    let mut init = Command::new("nix-store");
+    configure(&mut init);
+    ok(init.arg("--init"));
+    let mut cmd = Command::new(daemon);
+    configure(&mut cmd);
+    cmd
+}
+
 /// `prog` on `PATH` in the real store, out of any profile.
 pub fn resolved(prog: &str) -> PathBuf {
     let p = which(prog).unwrap_or_else(|| panic!("{prog} on PATH"));
@@ -86,11 +97,12 @@ impl Store {
             conf.push_str(&format!("{k} = {v}\n"));
         }
         fs::write(d.join("conf/nix.conf"), conf).unwrap();
-        let mut cmd = Command::new(daemon);
-        Store::env(d, &mut cmd);
+        let mut cmd = initialized_daemon(&daemon, |cmd| {
+            Store::env(d, cmd);
+            cmd.args(["--store", "local"]);
+        });
         let log = fs::File::create(d.join("daemon.log")).unwrap();
-        cmd.args(["--store", "local"])
-            .stdin(Stdio::null())
+        cmd.stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             // the per-connection children outlive the parent, so `Drop`
@@ -293,23 +305,23 @@ impl Store {
     pub fn builder(&self, name: &str, opts: &[(&str, &str)]) -> Builder {
         let root = self.dir().join(name);
         fs::create_dir(&root).unwrap();
-        let mut cmd = Command::new(which("nix-daemon").unwrap());
-        Store::env(self.dir(), &mut cmd);
+        let store = builder_store(&root, &self.store_dir());
+        let mut cmd = initialized_daemon(&which("nix-daemon").unwrap(), |cmd| {
+            Store::env(self.dir(), cmd);
+            cmd.env("NIX_DAEMON_SOCKET_PATH", root.join("socket"))
+                .args(["--store", &store, "--option", "sandbox-paths", "/nix/store"]);
+            for (k, v) in opts {
+                cmd.args(["--option", k, v]);
+            }
+        });
         let log = fs::File::create(root.join("daemon.log")).unwrap();
-        cmd.env("NIX_DAEMON_SOCKET_PATH", root.join("socket"))
-            .arg("--store")
-            .arg(builder_store(&root, &self.store_dir()))
-            .args(["--option", "sandbox-paths", "/nix/store"]);
-        for (k, v) in opts {
-            cmd.args(["--option", k, v]);
-        }
         cmd.stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .process_group(0);
         let mut b = Builder {
             daemon: cmd.spawn().expect("spawn nix-daemon"),
-            store: builder_store(&root, &self.store_dir()),
+            store,
             root,
         };
         let deadline = Instant::now() + Duration::from_secs(30);
