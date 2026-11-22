@@ -782,6 +782,7 @@ fn fetch_git_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::Env;
     use rstest::rstest;
     use tempfile::tempdir;
 
@@ -793,7 +794,7 @@ mod tests {
         for ambient in [true, false] {
             for configured in [true, false] {
                 let session = |allow: bool| {
-                    Session::with_env(crate::env::Env::isolated().with([(
+                    Session::with_env(Env::isolated().with([(
                         "NIX_CONFIG",
                         format!("allow-import-from-derivation = {allow}\n"),
                     )]))
