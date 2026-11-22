@@ -392,7 +392,9 @@ pub fn journal(ev: &mut Evaluator) -> bool {
     }
 }
 
-/// Stop a helper before an effect whose first demanded site decides its outcome.
+/// Retry a helper on demand before it changes or relies on evaluation-order
+/// dependent state. Unwinding keeps intermediate thunks from caching a result.
+#[inline]
 pub(crate) fn require_demand(ev: &mut Evaluator) -> EvalResult<()> {
     if journal(ev) {
         Err(cancelled())
@@ -904,9 +906,14 @@ mod tests {
     use crate::print::print_ambiguous;
     use crate::runtime::PrimFn;
     use crate::session::Session;
+    use crate::store::hash::{HashAlgo, hash_bytes};
+    use crate::store::nar;
+    use crate::store::path::make_text_path;
+    use crate::{sys, treestore};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::thread;
     use std::time::Duration;
+    use std::{fs, process};
 
     #[test]
     fn returned_thunk_retries_after_a_parked_helper_is_cancelled() {
@@ -965,6 +972,113 @@ mod tests {
         assert_eq!(error.msg, "body");
         assert!(error.trace.iter().any(|(_, text)| text == "on demand"));
         assert_eq!(MESSAGES.load(Ordering::Relaxed), before + 1);
+    }
+
+    fn to_file_and_probe(ev: &mut Evaluator, probe: &str) -> &'static [Cell] {
+        // Embed a context-free name. Obtaining it from toFile inside this
+        // evaluation would demand the very publication we want to observe.
+        let unique = tempfile::tempdir().unwrap();
+        let name = unique.path().file_name().unwrap().to_str().unwrap();
+        let path = make_text_path(
+            name,
+            &hash_bytes(HashAlgo::Sha256, b"contents"),
+            &Default::default(),
+        )
+        .unwrap();
+        let base = path.base_name();
+        let expr = format!(
+            r#"let target = builtins.storeDir + "/{base}"; in [ (builtins.toFile "{name}" "contents") ({probe}) ]"#
+        );
+        ev.eval_string(&expr, b"/")
+            .unwrap()
+            .as_list()
+            .unwrap()
+            .cells()
+    }
+
+    #[test]
+    fn speculative_to_file_does_not_publish() {
+        for pure in [true, false] {
+            let ev = EvalConfig::new().pure(pure).build();
+            let exists = try_run(2, ev, |ev| {
+                let cells = to_file_and_probe(ev, "builtins.pathExists target");
+                ahead(ev, 0..1, |i| &cells[i]);
+                ev.force_cell(&cells[1]).unwrap() == Word::TRUE
+            })
+            .unwrap();
+            assert!(!exists, "pure = {pure}");
+        }
+    }
+
+    #[test]
+    fn speculative_path_exists_observes_demanded_to_file() {
+        for pure in [true, false] {
+            let ev = EvalConfig::new().pure(pure).build();
+            let exists = try_run(2, ev, |ev| {
+                let cells = to_file_and_probe(ev, "builtins.pathExists target");
+                ahead(ev, 1..2, |i| &cells[i]);
+                ev.force_cell(&cells[0]).unwrap();
+                ev.force_cell(&cells[1]).unwrap() == Word::TRUE
+            })
+            .unwrap();
+            assert!(exists, "pure = {pure}");
+        }
+    }
+
+    #[test]
+    fn speculative_find_file_observes_the_first_demanded_match() {
+        let ev = EvalConfig::new().pure(false).build();
+        let chose_first = try_run(2, ev, |ev| {
+            let cells = to_file_and_probe(
+                ev,
+                r#"toString (builtins.findFile [
+                { prefix = "x"; path = target; }
+                { prefix = "x"; path = "/"; }
+            ] "x") == target"#,
+            );
+            ahead(ev, 1..2, |i| &cells[i]);
+            ev.force_cell(&cells[0]).unwrap();
+            ev.force_cell(&cells[1]).unwrap() == Word::TRUE
+        })
+        .unwrap();
+        assert!(chose_first);
+    }
+
+    #[test]
+    fn speculative_source_copy_does_not_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("speculative-input");
+        fs::write(&file, process::id().to_string()).unwrap();
+        let hash = nar::nar_hash(&file).unwrap();
+        let sp = treestore::store_path("speculative-input", &hash).unwrap();
+        for producer in [
+            "builtins.path { path = ./speculative-input; }",
+            "builtins.filterSource (_: _: true) ./speculative-input",
+            r#""${./speculative-input}""#,
+        ] {
+            let base = sys::path_to_internal(dir.path());
+            let probe = format!(
+                r#"builtins.pathExists (builtins.storeDir + "/{}")"#,
+                sp.base_name()
+            );
+            let expr = format!("[ ({producer}) ({probe}) ({probe}) ]");
+            let ev = EvalConfig::new().pure(false).build();
+            let observed = try_run(2, ev, move |ev| {
+                let cells = ev
+                    .eval_string(&expr, &base)
+                    .unwrap()
+                    .as_list()
+                    .unwrap()
+                    .cells();
+                ahead(ev, 0..1, |i| &cells[i]);
+                let before = ev.force_cell(&cells[1]).unwrap() == Word::TRUE;
+                ev.force_cell(&cells[0]).unwrap();
+                let after = ev.force_cell(&cells[2]).unwrap() == Word::TRUE;
+                (before, after)
+            })
+            .unwrap();
+            assert_eq!(observed, (false, true), "{producer}");
+        }
     }
 
     #[test]
