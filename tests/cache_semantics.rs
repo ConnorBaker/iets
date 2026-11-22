@@ -183,6 +183,36 @@ fn strs(v: &[String]) -> Vec<&str> {
 }
 
 #[rstest]
+fn absence_does_not_replay_through_a_symlink_loop(work: Work) {
+    let parent = work.path("ancestor");
+    let expr = format!(r#"builtins.pathExists "{}/child""#, parent.display());
+    let check = || work.eval(&["-E", &expr]);
+    assert_eq!(check().out.trim(), "false");
+    // ENOTDIR and ENOENT give pathExists the same answer.
+    fs::write(&parent, "").unwrap();
+    assert!(check().status.contains("cache: hit"));
+
+    fs::remove_file(&parent).unwrap();
+    symlink("ancestor", &parent).unwrap();
+    let r = check();
+    assert_ne!(r.rc, 0);
+    assert!(r.status.contains("miss ("), "{}", r.status);
+
+    // findFile skips an unreadable candidate and returns the fallback.
+    // Its successful result must not publish ELOOP as a negative stat.
+    work.write("fallback/child", "");
+    let search = format!(
+        r#"builtins.findFile [ {{ path = "{}"; }} {{ path = "{}"; }} ] "child""#,
+        parent.display(),
+        work.s("fallback")
+    );
+    let r = work.eval(&["-E", &search]);
+    assert_eq!(r.rc, 0);
+    assert_eq!(r.out.trim(), work.s("fallback/child"));
+    assert!(r.status.contains("not written"), "{}", r.status);
+}
+
+#[rstest]
 fn hits_and_misses(work: Work) {
     let main = main_nix(&work);
     let main = strs(&main);
