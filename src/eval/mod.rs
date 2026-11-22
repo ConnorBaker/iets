@@ -11,10 +11,12 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(not(target_os = "wasi"))]
+use std::ptr;
 use std::str::from_utf8;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use std::{fs, io, mem, ptr};
+use std::{fs, io, mem};
 
 pub use error::{Error, ErrorKind, EvalResult, Pos};
 
@@ -50,7 +52,16 @@ use crate::syntax::symbol::{FxHashMap, FxHashSet, Interner, Sym};
 use crate::trace::{self, Trace, store};
 use crate::{argv, config, parallel, syntax};
 
+#[cfg(not(target_os = "wasi"))]
 pub const MAX_CALL_DEPTH: u32 = 10000;
+/// A page cannot set the stack of WebAssembly, and what runs out of it ends
+/// the instance: stop while that can still be an error. This value holds in
+/// the web workers of Firefox 158 and Chromium 156 with the most stack that
+/// parsing, `fromJSON` or a regex can add at the limit. Chromium trapped at
+/// 1250. On this target `deeper` counts more than calls, so plain recursion
+/// stops at about 250 Nix calls.
+#[cfg(target_os = "wasi")]
+pub const MAX_CALL_DEPTH: u32 = 1000;
 
 /// Virtual path prefix for the embedded corepkgs (`<nix/fetchurl.nix>`).
 pub struct CorePkgs;
@@ -1349,7 +1360,7 @@ impl Evaluator {
             }] += 1;
             self.arena.stats.census.note_thunk_forced(w.bits());
         }
-        let v = self.run_thunk(w, st);
+        let v = self.deeper(Pos::NONE, |ev| ev.run_thunk(w, st));
         match v {
             Ok(v) => {
                 debug_assert!(!v.is_thunk());
@@ -1579,7 +1590,7 @@ impl Evaluator {
                 }
                 for attr in a.iter() {
                     self.force_cell(&attr.cell)
-                        .and_then(|v| self.force_deep_inner(v, seen))
+                        .and_then(|v| self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen)))
                         .map_err(|mut e| {
                             e.add_trace(
                                 attr.pos,
@@ -1598,7 +1609,7 @@ impl Evaluator {
                 }
                 for (i, c) in l.cells().iter().enumerate() {
                     self.force_cell(c)
-                        .and_then(|v| self.force_deep_inner(v, seen))
+                        .and_then(|v| self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen)))
                         .map_err(|mut e| {
                             e.add_list_trace(Pos::NONE, i);
                             e
@@ -1845,6 +1856,26 @@ impl Evaluator {
             return Err(Error::stack_overflow(pos));
         }
         Ok(())
+    }
+
+    /// Run `f` one level deeper. Most targets leave this recursion out of the
+    /// call depth, as Nix does, and have a stack that can hold it. A browser's
+    /// cannot: there, it counts as calls do. So does each `eval`, because
+    /// expressions nested in one function body use stack with no call
+    /// between them.
+    #[inline(always)]
+    pub(crate) fn deeper<T>(
+        &mut self,
+        pos: Pos,
+        f: impl FnOnce(&mut Self) -> EvalResult<T>,
+    ) -> EvalResult<T> {
+        if !cfg!(target_os = "wasi") {
+            return f(self);
+        }
+        self.enter_call(pos)?;
+        let r = f(self);
+        self.call_depth -= 1;
+        r
     }
 
     /// Apply `func` to `args` left to right. Returns a forced value.
@@ -2246,9 +2277,17 @@ impl Evaluator {
     }
 
     /// Evaluate `ir` in `env` to weak head normal form.
+    pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+        if cfg!(target_os = "wasi") {
+            return self.deeper(Pos::NONE, |ev| ev.dispatch(env, ir));
+        }
+        self.dispatch(env, ir)
+    }
+
     /// One small handler per node kind, tail-called: each recursion pays
     /// for its own kind's frame, not for the largest arm's.
-    pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+    #[inline(always)]
+    fn dispatch(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         match ir {
             Ir::Const(w, _) => Ok(*w),
             Ir::LazyConst(_, ConstOrigin::Builtin(sym)) => {
@@ -3614,7 +3653,10 @@ impl Evaluator {
             crate::builtins::text::regex_cache_len()
         );
         // SAFETY: a null argument prints to stderr.
-        unsafe { libmimalloc_sys::mi_stats_print(ptr::null_mut()) };
+        #[cfg(not(target_os = "wasi"))]
+        unsafe {
+            libmimalloc_sys::mi_stats_print(ptr::null_mut())
+        };
         if self.session.settings().stats >= 2 {
             #[cfg(feature = "stats2")]
             {

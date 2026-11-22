@@ -152,6 +152,7 @@ impl Taint {
     }
 }
 
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<Ctx>() == 40);
 
 impl Ctx {
@@ -162,7 +163,7 @@ impl Ctx {
     }
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct StringObj {
     pub kind: Kind,
     /// Census only (`stats2`): set once the string was viewed.
@@ -177,6 +178,7 @@ pub struct StringObj {
     pub ctx: &'static [Ctx],
 }
 
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<StringObj>() == 40);
 
 impl StringObj {
@@ -193,7 +195,7 @@ impl StringObj {
     }
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PathObj {
     pub kind: Kind,
     pub path: &'static [u8],
@@ -242,7 +244,7 @@ pub struct AttrsObj {
 /// priority first. Lookups probe the leaves from the last; an iteration
 /// merges them; `flat` caches the copy once someone needs the entries as
 /// one slice.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct UnionTail {
     pub flat: Cell,
     // followed by `leaves` pointers to flat sets
@@ -282,7 +284,7 @@ pub(crate) fn leaf_count(a: &'static AttrsObj) -> usize {
 /// Envs are reached only through `up`, lambdas and thunks, never through a
 /// `Word`, so they carry no `Kind`; slot indices come from the compiler, so
 /// they carry no length either. Header is one word.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct EnvObj {
     #[cfg(not(feature = "stats2"))]
     pub up: *const EnvObj,
@@ -293,7 +295,7 @@ pub struct EnvObj {
 
 /// Closures are the third most common object; `TAG_LAMBDA` on the word
 /// replaces the Kind byte so the object is two words.
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct LambdaObj {
     pub env: &'static EnvObj,
     pub lam: &'static LambdaIr,
@@ -301,7 +303,7 @@ pub struct LambdaObj {
 
 pub type PrimFn = fn(&mut Evaluator, &[Word], Pos) -> Result<Word, Box<eval::Error>>;
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PrimOpObj {
     pub kind: Kind,
     pub arity: u8,
@@ -312,7 +314,7 @@ pub struct PrimOpObj {
     pub f: PrimFn,
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct PrimOpAppObj {
     pub kind: Kind,
     pub op: &'static PrimOpObj,
@@ -396,7 +398,9 @@ const _: () = assert!(size_of::<Attr>() == 16);
 const _: () = assert!(size_of::<ThunkObj>() == 16);
 const _: () = assert!(size_of::<ThunkAppObj>() == 16);
 const _: () = assert!(size_of::<ThunkApp2Obj>() == 24);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<MapDesc>() == 24);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<LambdaObj>() == 16);
 
 impl ThunkObj {
