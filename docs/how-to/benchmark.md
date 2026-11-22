@@ -43,7 +43,7 @@ paths and the output paths for flat and recursive hashes.
 
 ```sh
 nix run .#bench-callgrind -- '*::evaluation::*::fixed_derivations' \
-  --callgrind-args='--cache-sim=no --dump-instr=yes' --callgrind-metrics=Ir
+  --callgrind-args='--cache-sim=no --dump-instr=yes --skip-plt=no' --callgrind-metrics=Ir
 ```
 
 To profile ordinary derivations with producer inputs, run:
@@ -109,7 +109,10 @@ The runner exposes flamegraphs through its Rust API rather than a CLI option.
 SVGs are opt-in because expanding recursive graphs can use substantial memory.
 `TotalRW` includes instruction fetches. Raw profiles can also be opened with
 `callgrind_annotate` or KCachegrind without generating SVGs. For guest instruction
-counts at individual addresses, pass `--callgrind-args=--dump-instr=yes`.
+attribution at individual addresses, pass
+`--callgrind-args='--dump-instr=yes --skip-plt=no'`. By default Callgrind can
+charge skipped PLT work to a caller. Before interpreting an address weight as a
+call count, cross-check adjacent instructions on the same straight-line path.
 Native `perf record` instruction samples can favor some addresses even with
 precise IPs, so sample shares alone cannot establish per-function instruction counts.
 
