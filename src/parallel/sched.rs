@@ -92,18 +92,14 @@ pub struct Task {
 }
 
 impl Task {
-    /// 8 bits of kind, the whole 32 of start, 16 of len. A container holds
-    /// at most `u32::MAX` cells and a range is at most one batch, so
-    /// nothing is dropped.
+    /// 8 bits of kind, 32 of start, 16 of len; rejects lengths that do not fit.
     #[inline]
-    fn pack(self) -> (u64, u64) {
-        debug_assert!(self.len <= LEN_MAX);
-        (
+    fn pack(self) -> Option<(u64, u64)> {
+        let len = u16::try_from(self.len).ok()?;
+        Some((
             self.obj.bits(),
-            self.kind as u64
-                | ((self.start as u64) << 8)
-                | ((self.len as u64 & LEN_MAX as u64) << 40),
-        )
+            self.kind as u64 | ((self.start as u64) << 8) | (u64::from(len) << 40),
+        ))
     }
 
     #[inline]
@@ -656,8 +652,11 @@ impl Runtime {
     }
 
     /// Owner push from the worker currently running the caller.
+    /// Returns false if the lane is full or the task length exceeds 65,535.
     pub fn submit_urgent(&self, w: &Worker, t: Task) -> bool {
-        let (a, b) = t.pack();
+        let Some((a, b)) = t.pack() else {
+            return false;
+        };
         if self.lanes[w.idx].urgent.push_with(a, b, || {
             self.pending_tasks.0.fetch_add(1, Ordering::SeqCst);
         }) {
@@ -1005,13 +1004,16 @@ mod tests {
     use std::sync::atomic::{AtomicPtr, AtomicU64};
 
     #[rstest]
-    #[case(7, 0, 0)]
-    #[case(1, 16_777_216, 16)]
-    #[case(8, u32::MAX, LEN_MAX)]
+    #[case(7, 0, 0, true)]
+    #[case(1, 16_777_216, 16, true)]
+    #[case(8, u32::MAX, LEN_MAX, true)]
+    #[case(8, u32::MAX, LEN_MAX + 1, false)]
+    #[case(8, u32::MAX, LEN_MAX + 2, false)]
     fn a_task_survives_packing_past_the_old_24_bit_start(
         #[case] kind: u8,
         #[case] start: u32,
         #[case] len: u32,
+        #[case] accepted: bool,
     ) {
         let t = Task {
             kind,
@@ -1019,8 +1021,11 @@ mod tests {
             start,
             len,
         };
-        let (a, b) = t.pack();
-        assert_eq!(Task::unpack(a, b), t);
+        let packed = t.pack();
+        assert_eq!(packed.is_some(), accepted);
+        if let Some((a, b)) = packed {
+            assert_eq!(Task::unpack(a, b), t);
+        }
     }
 
     #[test]
