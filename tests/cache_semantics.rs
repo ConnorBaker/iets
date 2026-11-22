@@ -330,6 +330,53 @@ fn compiling_a_home_path_reports_no_ir_publication(work: Work) {
 }
 
 #[rstest]
+fn ir_statistics_only_report_published_entries(work: Work) {
+    let file = work.write("answer.nix", "21 * 2");
+    let evaluate = |action: &str| {
+        let output = work
+            .iets()
+            .env("IETS_IR_MIN", "0")
+            .env("IETS_IR_STATS", "1")
+            .args(["eval", "--no-tracing-cache", "-f", &file])
+            .output()
+            .unwrap();
+        let log = stderr(&output);
+        assert!(output.status.success(), "{log}");
+        assert_eq!(stdout(&output), "42");
+        assert!(log.contains(&format!("ir-cache {action} {file} ")), "{log}");
+        assert_eq!(log.contains("ir-cache store "), action == "store", "{log}");
+    };
+    evaluate("store");
+    let ir = work.path("cache/ir");
+    let entry = fingerprint(&ir)
+        .into_iter()
+        .map(|(path, _, _)| path)
+        .find(|path| path.parent() != Some(ir.as_path()))
+        .expect("published entry in a shard");
+    fs::remove_file(&entry).unwrap();
+
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .open(ir.join("lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    evaluate("compile");
+    assert!(!entry.exists());
+    drop(lock);
+    evaluate("store");
+    evaluate("load");
+
+    // A directory at the entry's final name makes the atomic rename fail.
+    fs::remove_file(&entry).unwrap();
+    fs::create_dir(&entry).unwrap();
+    evaluate("compile");
+    evaluate("compile");
+    fs::remove_dir(&entry).unwrap();
+    evaluate("store");
+    evaluate("load");
+}
+
+#[rstest]
 fn uncacheable_runs_write_nothing(work: Work) {
     let r = work.eval(&["-E", "builtins.currentTime > 0"]);
     assert!(r.status.contains("not written"), "{}", r.status);
