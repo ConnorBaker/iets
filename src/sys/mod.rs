@@ -34,6 +34,8 @@ mod ffi;
 #[cfg_attr(windows, path = "fs_windows.rs")]
 #[cfg_attr(target_os = "wasi", path = "fs_wasi.rs")]
 pub mod fs;
+#[cfg(not(windows))]
+mod fs_times;
 #[cfg_attr(any(windows, target_os = "wasi"), path = "net_none.rs")]
 pub mod net;
 #[cfg_attr(windows, path = "process_windows.rs")]
