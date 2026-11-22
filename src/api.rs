@@ -508,7 +508,7 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
     match a.input.as_ref()? {
         Input::Expr(e) => {
             k.field("expr", e.as_bytes());
-            needs_cwd |= has_relative_path(e);
+            needs_cwd = has_relative_path(e);
         }
         // The file and the flake are named by path, never by content: the run
         // reads them through the traced reader, so the read set holds them,
@@ -539,7 +539,7 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
             ArgKind::Expr(e) => {
                 k.field("arg", name.as_bytes());
                 k.field("val", e.as_bytes());
-                needs_cwd |= has_relative_path(e);
+                needs_cwd = needs_cwd || has_relative_path(e);
             }
             ArgKind::Str(s) => {
                 k.field("argstr", name.as_bytes());
