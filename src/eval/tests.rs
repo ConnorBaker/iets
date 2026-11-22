@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
 
-use crate::print;
+use crate::{parallel, print};
 
 fn eval_with(mut ev: Evaluator, src: &str) -> Result<String, String> {
     let v = ev
@@ -21,6 +21,33 @@ fn eval_str(src: &str) -> String {
 
 fn eval_err(src: &str) -> String {
     eval_with(Evaluator::new(), src).expect_err("expected an error")
+}
+
+#[rstest]
+#[case(1)]
+#[case(4)]
+fn deep_force_traces_the_path_to_the_error(#[case] workers: usize) {
+    let error = parallel::try_run(workers, Evaluator::new(), |ev| {
+        let value = ev.eval_string(r#"{ outer = [ 0 { inner = throw "sentinel"; } ]; }"#, b"/")?;
+        ev.force_deep(value).map(|_| ())
+    })
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(error.msg, "sentinel");
+    let path: Vec<_> = error
+        .trace
+        .iter()
+        .filter(|(_, msg)| msg.starts_with("while evaluating"))
+        .map(|(pos, msg)| (*pos != Pos::NONE, msg.as_str()))
+        .collect();
+    assert_eq!(
+        path,
+        [
+            (true, "while evaluating the attribute 'inner'"),
+            (false, "while evaluating list element at index 1"),
+            (true, "while evaluating the attribute 'outer'")
+        ]
+    );
 }
 
 #[rstest]
