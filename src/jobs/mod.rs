@@ -14,6 +14,7 @@ pub mod line;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::iter;
+use std::str;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Mutex, OnceLock};
 
@@ -152,10 +153,24 @@ pub fn configure(ev: &mut Evaluator, opts: Opts, auto_args: Word, apply: Option<
 }
 
 /// Walk `root` and hand every job or error line to `sink`, in
-/// lexicographic depth-first order.
-pub fn run(ev: &mut Evaluator, root: Word, sink: &mut dyn FnMut(Line)) {
+/// lexicographic depth-first order. Invalid UTF-8 in a traversed set's
+/// child names is a serialization failure, not a job error line.
+pub fn run(ev: &mut Evaluator, root: Word, sink: &mut dyn FnMut(Line)) -> EvalResult<()> {
     let mut path = Vec::new();
-    walk(ev, root, &mut path, FNV_BASIS, sink);
+    walk(ev, root, &mut path, FNV_BASIS, sink)
+}
+
+fn validate_names(ev: &Evaluator, attrs: &[Attr]) -> EvalResult<()> {
+    for attr in attrs {
+        if str::from_utf8(ev.interner.name(attr.sym)).is_err() {
+            return Err(Error::boxed(
+                ErrorKind::Eval,
+                "JSON serialization error: invalid UTF-8 byte in attribute name",
+                Pos::NONE,
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub enum Node {
@@ -170,14 +185,15 @@ fn walk(
     path: &mut Vec<String>,
     hash: u64,
     sink: &mut dyn FnMut(Line),
-) {
+) -> EvalResult<()> {
     let depth = path.len() as u32;
     if depth == config().opts.chunk_depth && !admit(hash, depth, false) {
-        return;
+        return Ok(());
     }
     match node(ev, w, path, hash) {
         Ok(Node::Job(job)) => sink(Line::Job(job)),
         Ok(Node::Recurse(attrs)) => {
+            validate_names(ev, attrs.attrs())?;
             remember_set(attrs, hash, depth);
             let ordered: Vec<&Attr> = lexicographic_order(ev, attrs).collect();
             let cells = attrs.attrs();
@@ -195,8 +211,9 @@ fn walk(
                     let name = ev.interner.name_str(attr.sym).to_string();
                     let h = fnv_step(hash, name.as_bytes());
                     path.push(name);
-                    walk(ev, attr.cell.get(), path, h, sink);
+                    let result = walk(ev, attr.cell.get(), path, h, sink);
                     path.pop();
+                    result?;
                 }
             }
         }
@@ -206,6 +223,7 @@ fn walk(
         Err(_) if !admit(hash, depth, true) => {}
         Err(e) => sink(Line::Error(error_line(ev, path, &e))),
     }
+    Ok(())
 }
 
 /// The error line for `path`, also printed to stderr as nix-eval-jobs does.
@@ -778,8 +796,13 @@ fn job_inner(ev: &mut Evaluator, a: &'static AttrsObj, path: &[String]) -> EvalR
 /// an evaluation error in one child does not stop the others.
 pub fn prefetch_range(ev: &mut Evaluator, attrs: &'static AttrsObj, start: usize, end: usize) {
     // A set the walk never registered is treated as below the chunk depth.
+    let range = &attrs.attrs()[start..end];
+    // Keep cancellation ahead of any symbol lookup, as in prefetch_child.
+    if bail_requested(ev) || ev.par.cancelled || validate_names(ev, range).is_err() {
+        return;
+    }
     let (hash, depth) = recall_set(attrs).unwrap_or((FNV_BASIS, u32::MAX - 1));
-    for attr in &attrs.attrs()[start..end] {
+    for attr in range {
         if prefetch_child(ev, attr, hash, depth).is_err() {
             return;
         }
@@ -848,6 +871,7 @@ fn prefetch_value(ev: &mut Evaluator, v: Word, hash: u64, depth: u32) -> EvalRes
         return Ok(());
     }
     let a = ev.arena.flat(a);
+    validate_names(ev, a.attrs())?;
     remember_set(a, hash, depth);
     fanout_range(ev, T_JOB, Word::from_ref(a), 0, a.len(), JOB_BATCH);
     for attr in a.attrs() {
@@ -886,6 +910,85 @@ fn prefetch_job(ev: &mut Evaluator, a: &'static AttrsObj) -> EvalResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parallel::interner::Interner;
+
+    #[test]
+    fn job_paths_reject_invalid_utf8_without_aliasing_a_literal_name() {
+        let mut ev = Evaluator::new();
+        let args = ev.eval_string("{ }", b"/").unwrap();
+        configure(
+            &mut ev,
+            Opts {
+                no_instantiate: true,
+                ..Opts::default()
+            },
+            args,
+            None,
+        );
+        let job = ev
+            .eval_string(
+                r#"{ type = "derivation"; name = "job"; system = "x";
+                 drvPath = "/nix/store/00000000000000000000000000000000-job.drv";
+                 outPath = "/nix/store/00000000000000000000000000000000-out"; }"#,
+                b"/",
+            )
+            .unwrap();
+        let literal = ev.sym(b"<non-utf8>");
+        for name in [b"\xfe".as_slice(), b"\xff"] {
+            let bad = ev.sym(name);
+            let root = ev
+                .arena
+                .mk_attrs(&mut [(literal, Pos::NONE, job), (bad, Pos::NONE, job)])
+                .unwrap();
+            let mut lines = Vec::new();
+            let error = run(&mut ev, root, &mut |line| lines.push(line)).unwrap_err();
+            assert!(error.msg.contains("invalid UTF-8"));
+            assert!(lines.is_empty());
+        }
+        let list = ev.eval_string("let f = x: x; in [ (f 7) ]", b"/").unwrap();
+        let thunk = ev.force_list(list, Pos::NONE, "").unwrap().cells()[0].get();
+        assert!(thunk.is_thunk());
+        let bad = ev.sym(b"\xff");
+        let root = ev.arena.mk_attrs(&mut [(bad, Pos::NONE, thunk)]).unwrap();
+        let attrs = root.as_attrs().unwrap();
+        prefetch_range(&mut ev, attrs, 0, 1);
+        assert!(attrs.attrs()[0].cell.get().is_thunk());
+        let root = ev.arena.mk_attrs(&mut [(literal, Pos::NONE, job)]).unwrap();
+        let mut paths = Vec::new();
+        run(&mut ev, root, &mut |line| match line {
+            Line::Job(job) => paths.push(job.attr_path),
+            Line::Error(_) => panic!("valid job"),
+        })
+        .unwrap();
+        assert_eq!(paths, [vec!["<non-utf8>".to_string()]]);
+        // Registration alone does not identify an evaluator's interner.
+        let root = ev
+            .arena
+            .mk_attrs(&mut [(literal, Pos::NONE, thunk)])
+            .unwrap();
+        let attrs = root.as_attrs().unwrap();
+        validate_names(&ev, attrs.attrs()).unwrap();
+        remember_set(attrs, FNV_BASIS, 0);
+        let mut other = Interner::new();
+        for i in 0..literal.0 {
+            other.intern(i.to_string().as_bytes());
+        }
+        assert_eq!(other.intern(b"\xff"), literal);
+        ev.interner = other;
+        prefetch_range(&mut ev, attrs, 0, 1);
+        assert!(attrs.attrs()[0].cell.get().is_thunk());
+    }
+
+    #[test]
+    fn cancelled_prefetch_does_not_resolve_names() {
+        let mut ev = Evaluator::new();
+        ev.par.cancelled = true;
+        let root = ev
+            .arena
+            .mk_attrs(&mut [(Sym(u32::MAX), Pos::NONE, Word::NULL)])
+            .unwrap();
+        prefetch_range(&mut ev, root.as_attrs().unwrap(), 0, 1);
+    }
 
     use crate::eval::EvalConfig;
     use crate::lint::{Config, Level, Scope};
