@@ -184,6 +184,40 @@ fn args(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| s.to_string()).collect()
 }
 
+/// Check the bytes and registered references before the oracle can populate the store.
+#[test]
+fn registers_rewritten_aggregate() {
+    let Some(c) = setup() else { return };
+    let args = args(&[
+        "--constituents",
+        "--select",
+        "j: { success = { inherit (j.success) anotherone indirect_aggregate recurseForDerivations; }; }",
+        "aggregates.nix",
+    ]);
+    let rows = ok(&mut c.iets(&args));
+    let jobs: Vec<Value> = serde_json::Deserializer::from_slice(&rows.stdout)
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let path = |attr: &str| {
+        jobs.iter().find(|j| j["attr"] == attr).unwrap()["drvPath"]
+            .as_str()
+            .unwrap()
+    };
+    let aggregate = path("success.indirect_aggregate");
+    let child = path("success.anotherone");
+    let text = fs::read(aggregate).expect("iets registered the rewritten aggregate");
+    assert_eq!(c.s.nix_store(&["-q", "--references", aggregate]), child);
+
+    // Recreate the same logical store path independently with nix-eval-jobs.
+    c.s.nix_store(&["--delete", aggregate]);
+    assert!(!Path::new(aggregate).exists());
+    let reference = ok(&mut c.nej(&args));
+    assert_eq!(norm(&rows), norm(&reference));
+    assert_eq!(fs::read(aggregate).unwrap(), text);
+    assert_eq!(c.s.nix_store(&["-q", "--references", aggregate]), child);
+}
+
 #[test]
 fn flags_match_nix_eval_jobs() {
     let Some(c) = setup() else { return };
