@@ -4,6 +4,8 @@ use super::{ErrorKind, EvalConfig, Evaluator, Pos};
 use rstest::rstest;
 
 use crate::print;
+#[cfg(feature = "stats2")]
+use crate::runtime::Word;
 
 fn eval_with(mut ev: Evaluator, src: &str) -> Result<String, String> {
     let v = ev
@@ -796,8 +798,6 @@ fn selection_stops_before_later_names_and_forces_the_final_value(
 #[cfg(feature = "stats2")]
 #[test]
 fn scope_census_counts_only_preexisting_map_thunks_as_escapes() {
-    use crate::runtime::Word;
-
     for packed in [false, true] {
         for created_in_scope in [false, true] {
             let mut ev = Evaluator::new();
