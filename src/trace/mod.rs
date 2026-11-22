@@ -59,20 +59,16 @@ impl Kind {
     }
 
     pub fn of(r: &io::Result<fs::Metadata>) -> Kind {
+        Self::observed(r).unwrap_or(Kind::Missing)
+    }
+
+    /// Only a missing path or a non-directory ancestor proves absence.
+    fn observed(r: &io::Result<fs::Metadata>) -> Result<Kind, &io::Error> {
+        use io::ErrorKind::{NotADirectory, NotFound};
         match r {
-            Ok(m) => {
-                let ft = m.file_type();
-                if ft.is_symlink() {
-                    Kind::Symlink
-                } else if ft.is_dir() {
-                    Kind::Directory
-                } else if ft.is_file() {
-                    Kind::Regular
-                } else {
-                    Kind::Other
-                }
-            }
-            Err(_) => Kind::Missing,
+            Ok(m) => Ok(Kind::of_file_type(&m.file_type())),
+            Err(e) if matches!(e.kind(), NotFound | NotADirectory) => Ok(Kind::Missing),
+            Err(e) => Err(e),
         }
     }
 
@@ -434,11 +430,30 @@ impl Trace {
         }
     }
 
+    /// Preserve callers' fallback for failed probes without recording an
+    /// unobservable kind as evidence for that result.
+    pub(crate) fn record_stat(
+        &self,
+        path: &[u8],
+        follow: bool,
+        r: &io::Result<fs::Metadata>,
+    ) -> Kind {
+        match Kind::observed(r) {
+            Ok(kind) => {
+                self.stat(path, follow, kind);
+                kind
+            }
+            Err(_) => {
+                self.mark_uncacheable();
+                Kind::Missing
+            }
+        }
+    }
+
     /// Stats `path` and records what it saw; returns the kind.
     pub fn stat_now(&self, path: &[u8], follow: bool) -> Kind {
-        let kind = stat_kind(&sys::path_from_internal(&sys::from_native(path)), follow);
-        self.stat(path, follow, kind);
-        kind
+        let r = stat_metadata(&sys::path_from_internal(&sys::from_native(path)), follow);
+        self.record_stat(path, follow, &r)
     }
 
     pub fn env(&self, name: &[u8]) {
@@ -613,12 +628,15 @@ pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
 }
 
 pub fn stat_kind(p: &Path, follow: bool) -> Kind {
-    let r = if follow {
+    Kind::of(&stat_metadata(p, follow))
+}
+
+pub(crate) fn stat_metadata(p: &Path, follow: bool) -> io::Result<fs::Metadata> {
+    if follow {
         fs::metadata(p)
     } else {
         fs::symlink_metadata(p)
-    };
-    Kind::of(&r)
+    }
 }
 
 /// sha256 of the sorted `(name, type)` listing of a directory, as `readDir`
