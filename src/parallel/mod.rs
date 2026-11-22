@@ -104,7 +104,7 @@ pub fn try_run<R: Send + 'static>(
     let _entered = ev.session().clone().enter();
     // Fine tracing keeps its observation stack on the calling thread. Only the
     // serial force path records edges when another slot reads a forced thunk.
-    if workers <= 1 || fine::on() {
+    if workers <= 1 || cfg!(target_os = "wasi") || fine::on() {
         let r = f(&mut ev);
         ev.lints.flush();
         return Ok(r);
