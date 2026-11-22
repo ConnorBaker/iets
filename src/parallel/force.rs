@@ -375,6 +375,17 @@ pub fn journal(ev: &mut Evaluator) -> bool {
     }
 }
 
+/// Retry a helper on demand before it changes or relies on evaluation-order
+/// dependent state. Unwinding keeps intermediate thunks from caching a result.
+#[inline]
+pub(crate) fn require_demand(ev: &mut Evaluator) -> EvalResult<()> {
+    if journal(ev) {
+        Err(cancelled())
+    } else {
+        Ok(())
+    }
+}
+
 pub static EFFECT_BAILS: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;
@@ -868,6 +879,59 @@ fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn to_file_and_probe(ev: &mut Evaluator) -> &'static [Cell] {
+        use crate::store::hash::{HashAlgo, hash_bytes};
+        use crate::store::path::make_text_path;
+
+        // Embed a context-free name. Obtaining it from toFile inside this
+        // evaluation would demand the very publication we want to observe.
+        let name = format!("iets-speculative-tofile-test-{}", std::process::id());
+        let path = make_text_path(
+            &name,
+            &hash_bytes(HashAlgo::Sha256, b"contents"),
+            &Default::default(),
+        )
+        .unwrap();
+        let base = path.base_name();
+        let expr = format!(
+            r#"[ (builtins.toFile "{name}" "contents") (builtins.pathExists (builtins.storeDir + "/{base}")) ]"#
+        );
+        ev.eval_string(&expr, b"/")
+            .unwrap()
+            .as_list()
+            .unwrap()
+            .cells()
+    }
+
+    #[test]
+    fn speculative_to_file_does_not_publish() {
+        for pure in [true, false] {
+            let ev = crate::eval::EvalConfig::new().pure(pure).build();
+            let exists = crate::parallel::try_run(2, ev, |ev| {
+                let cells = to_file_and_probe(ev);
+                ahead(ev, 0..1, |i| &cells[i]);
+                ev.force_cell(&cells[1]).unwrap() == Word::TRUE
+            })
+            .unwrap();
+            assert!(!exists, "pure = {pure}");
+        }
+    }
+
+    #[test]
+    fn speculative_path_exists_observes_demanded_to_file() {
+        for pure in [true, false] {
+            let ev = crate::eval::EvalConfig::new().pure(pure).build();
+            let exists = crate::parallel::try_run(2, ev, |ev| {
+                let cells = to_file_and_probe(ev);
+                ahead(ev, 1..2, |i| &cells[i]);
+                ev.force_cell(&cells[0]).unwrap();
+                ev.force_cell(&cells[1]).unwrap() == Word::TRUE
+            })
+            .unwrap();
+            assert!(exists, "pure = {pure}");
+        }
+    }
 
     #[test]
     fn coercion_walk_stops_cancelled_helper() {
