@@ -551,7 +551,7 @@ fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) 
     k.flag("strict", a.strict);
     k.flag("json", a.json);
     k.flag("raw", a.raw);
-    k.field("lints", lint_config(a).ok()?.key().as_bytes());
+    lint_config(a).ok()?.add_to_key(&mut k);
     k.field("system", cfg.current_system().as_bytes());
     // what builtins.fetchClosure trusts
     let conf = nix_conf(cfg.configured_session());
