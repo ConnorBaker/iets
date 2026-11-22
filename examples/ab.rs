@@ -414,7 +414,7 @@ mod ab {
         if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag.
+        // SAFETY: this prctl takes an integer flag.
         if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
             return Err(io::Error::last_os_error());
         }
@@ -422,46 +422,38 @@ mod ab {
     }
 
     #[cfg(target_os = "linux")]
-    fn kill_leftovers(deadline: Instant) -> io::Result<()> {
-        kill_leftovers_in(Path::new("/proc"), deadline)
+    fn check_proc_namespace(procfs: &Path, require_proof: bool) -> io::Result<()> {
+        let own = process::id().to_string();
+        // At startup reject visible mismatches, but defer unavailable proof until
+        // discovery. Equal PID numbers alone do not authorize signaling.
+        let matches = if !require_proof
+            && fs::read_link(procfs.join("self")).is_ok_and(|pid| pid != Path::new(&own))
+        {
+            false
+        } else {
+            let status = match fs::read(procfs.join("self/status")) {
+                Ok(status) => status,
+                Err(_) if !require_proof => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            // An ancestor mount can assign equal numeric PIDs in two namespaces.
+            status
+                .split(|&b| b == b'\n')
+                .find_map(|s| s.strip_prefix(b"NStgid:"))
+                .map_or(!require_proof, |ids| ids.trim_ascii() == own.as_bytes())
+        };
+        if matches {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "cleanup requires /proc in the caller's PID namespace with NStgid",
+            ))
+        }
     }
 
     #[cfg(target_os = "linux")]
-    fn check_proc_namespace(procfs: &Path, require_proof: bool) -> io::Result<()> {
-        let own_pid = process::id().to_string();
-        // Reject a known numeric mismatch even if legacy namespace links are denied.
-        if !require_proof
-            && fs::read_link(procfs.join("self")).is_ok_and(|pid| pid != Path::new(&own_pid))
-        {
-            return Err(io::Error::other("/proc uses a different PID namespace"));
-        }
-        let status = match fs::read(procfs.join("self/status")) {
-            Ok(status) => status,
-            Err(_) if !require_proof => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        // An ancestor namespace can assign us the same numeric PID. NStgid
-        // lists one PID per namespace from the procfs mount down to our own.
-        let same_namespace = match status
-            .split(|&b| b == b'\n')
-            .find_map(|s| s.strip_prefix(b"NStgid:"))
-        {
-            Some(ids) => ids.trim_ascii() == own_pid.as_bytes(),
-            // Before Linux 4.1, compare our namespace to that of PID 1
-            // in this mount. Without PID namespaces only the self link exists.
-            None if !require_proof => true,
-            None => match fs::read_link(procfs.join("self/ns/pid")) {
-                Ok(ours) => ours == fs::read_link(procfs.join("1/ns/pid"))?,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    fs::read_link(procfs.join("self"))? == Path::new(&own_pid)
-                }
-                Err(e) => return Err(e),
-            },
-        };
-        if !same_namespace {
-            return Err(io::Error::other("/proc uses a different PID namespace"));
-        }
-        Ok(())
+    fn kill_leftovers(deadline: Instant) -> io::Result<()> {
+        kill_leftovers_in(Path::new("/proc"), deadline)
     }
 
     // A first direct pass that starts after setup exhausted the deadline has
@@ -483,6 +475,12 @@ mod ab {
 
     #[cfg(target_os = "linux")]
     fn kill_leftovers_in(procfs: &Path, deadline: Instant) -> io::Result<()> {
+        // After grace, only a bounded direct pass is eligible. If the task
+        // directory is gone there are no PIDs to check or signal on this pass.
+        let tasks = procfs.join("self/task");
+        if Instant::now() >= deadline && !tasks.try_exists()? {
+            return Ok(());
+        }
         check_proc_namespace(procfs, true)?;
         // Some kernels omit the per-thread children files, while hidepid can
         // hide a child from the top-level listing. Check both sources.
@@ -511,9 +509,7 @@ mod ab {
                         return Err(e);
                     }
                 }
-                return Ok(
-                    observe_ready && matches!(children_state(libc::P_ALL, 0), Ok(Some(true)))
-                );
+                return Ok(observe_ready && children_state(libc::P_ALL, 0)? == Some(true));
             }
             Ok(false)
         };
@@ -521,7 +517,7 @@ mod ab {
             let mut complete = true;
             let mut found = false;
             let mut permit = direct_list_budget(first);
-            if let Ok(threads) = fs::read_dir(procfs.join("self/task")) {
+            if let Ok(threads) = fs::read_dir(&tasks) {
                 let mut field = Vec::new();
                 for task in threads {
                     if permit(Instant::now() < deadline).is_none() {
@@ -578,9 +574,6 @@ mod ab {
         for pass in 0..2 {
             let mut entries = match fs::read_dir(procfs) {
                 Ok(entries) => entries,
-                // A complete direct view already covers our children. The
-                // process table adds discovery when available, but is optional.
-                Err(_) if direct => return result,
                 Err(e) => return result.and(Err(e)),
             };
             while Instant::now() < deadline {
@@ -600,9 +593,12 @@ mod ab {
                     if Instant::now() >= deadline {
                         break;
                     }
-                    let state = children_state(libc::P_ALL, 0);
-                    waitable |= matches!(&state, Ok(Some(true)));
-                    if Instant::now() >= deadline || matches!(state, Ok(None)) {
+                    let state = match children_state(libc::P_ALL, 0) {
+                        Ok(state) => state,
+                        Err(e) => return result.and(Err(e)),
+                    };
+                    waitable |= state == Some(true);
+                    if Instant::now() >= deadline || state.is_none() {
                         break;
                     }
                     revisit = Instant::now() + REAP_INTERVAL;
@@ -1841,13 +1837,15 @@ mod ab {
             fs::set_permissions(procfs.path(), fs::Permissions::from_mode(0o111)).unwrap();
             let mut hidden = Command::new("sleep").arg("30").spawn().unwrap();
             fs::write(task.join("children"), hidden.id().to_string()).unwrap();
-            assert!(
-                !reap_after(Duration::ZERO, CLEANUP_GRACE, |deadline| kill_leftovers_in(
-                    procfs.path(),
-                    deadline
-                ))
-                .unwrap()
-            );
+            let table_error = fs::read_dir(procfs.path()).err().map(|e| e.kind());
+            let result = reap_after(Duration::ZERO, CLEANUP_GRACE, |deadline| {
+                kill_leftovers_in(procfs.path(), deadline)
+            });
+            if let Some(kind) = table_error {
+                assert_eq!(result.unwrap_err().kind(), kind);
+            } else {
+                assert!(!result.unwrap());
+            }
             assert_eq!(
                 hidden.wait().unwrap_err().raw_os_error(),
                 Some(libc::ECHILD)
@@ -2063,8 +2061,7 @@ mod ab {
             let status = root.join("self/status");
             fs::write(&status, b"Name:\tlegacy\n").unwrap();
             check_proc_namespace(root, false).unwrap();
-            // #433 already permits its checked no-namespace-link legacy fallback.
-            check_proc_namespace(root, true).unwrap();
+            assert!(check_proc_namespace(root, true).is_err());
             fs::write(&status, format!("NStgid:\t{own}\n")).unwrap();
             check_proc_namespace(root, false).unwrap();
             check_proc_namespace(root, true).unwrap();
