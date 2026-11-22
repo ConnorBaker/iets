@@ -332,16 +332,6 @@ fn string_list(ev: &mut Evaluator, w: Word, not_list: &str, ctx: &str) -> EvalRe
         .collect()
 }
 
-/// `type = "derivation"`, the test both the get-drvs walk and the output
-/// selection start from.
-fn is_derivation(ev: &mut Evaluator, attrs: &'static AttrsObj) -> EvalResult<bool> {
-    let Some(t) = attrs.get(ev.s.type_) else {
-        return Ok(false);
-    };
-    let t = forced_string(ev, t.cell.get(), "while evaluating the 'type' attribute")?;
-    Ok(t == "derivation")
-}
-
 /// The `drvPath` of a derivation attrset.
 fn drv_of(ev: &mut Evaluator, attrs: &'static AttrsObj) -> EvalResult<StorePath> {
     let Some(dp) = attrs.get(ev.s.drv_path) else {
@@ -556,7 +546,7 @@ fn one_derivation(
     let Some(attrs) = v.as_attrs() else {
         return Ok(false);
     };
-    if !is_derivation(ev, attrs)? {
+    if !ev.has_derivation_type(attrs)? {
         return Ok(false);
     }
     let drv = drv_of(ev, attrs)?;
@@ -615,7 +605,7 @@ pub fn to_app(ev: &mut Evaluator, v: Word, attr_path: &str) -> EvalResult<App> {
     if attrs.get(ev.s.type_).is_none() {
         return Err(missing("type"));
     }
-    if !is_derivation(ev, attrs)? {
+    if !ev.has_derivation_type(attrs)? {
         return Err(Error::boxed(
             ErrorKind::Eval,
             format!("attribute '{attr_path}' should have type 'derivation'"),
@@ -694,7 +684,7 @@ pub fn to_derivation(ev: &mut Evaluator, v: Word, what: &str) -> EvalResult<Stor
     let Some(attrs) = v.as_attrs() else {
         return Err(not_a_drv());
     };
-    if !is_derivation(ev, attrs)? {
+    if !ev.has_derivation_type(attrs)? {
         return Err(not_a_drv());
     }
     drv_of(ev, attrs)
@@ -712,7 +702,7 @@ pub fn to_install(ev: &mut Evaluator, v: Word, what: &str, flake: bool) -> EvalR
     let Some(attrs) = v.as_attrs() else {
         return Err(not_a_drv());
     };
-    if !is_derivation(ev, attrs)? {
+    if !ev.has_derivation_type(attrs)? {
         return Err(not_a_drv());
     }
     let drv = drv_of(ev, attrs)?;
