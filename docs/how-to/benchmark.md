@@ -112,7 +112,10 @@ SVGs are opt-in because expanding recursive graphs can use substantial memory.
 attribution at individual addresses, pass
 `--callgrind-args='--dump-instr=yes --skip-plt=no'`. By default Callgrind can
 charge skipped PLT work to a caller. Before interpreting an address weight as a
-call count, cross-check adjacent instructions on the same straight-line path.
+call count, cross-check adjacent instructions on the same straight-line path. For
+per-function totals, count self instructions within the symbol’s address range
+in the measured executable. A named Callgrind context can include addresses
+from other functions, and summing inclusive costs can count work repeatedly.
 Native `perf record` instruction samples can favor some addresses even with
 precise IPs, so sample shares alone cannot establish per-function instruction counts.
 
