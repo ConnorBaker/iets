@@ -934,6 +934,43 @@ mod tests {
     }
 
     #[test]
+    fn speculative_source_copy_does_not_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("speculative-input");
+        std::fs::write(&file, std::process::id().to_string()).unwrap();
+        let hash = crate::store::nar::nar_hash(&file).unwrap();
+        let sp = crate::treestore::store_path("speculative-input", &hash).unwrap();
+        for producer in [
+            "builtins.path { path = ./speculative-input; }",
+            "builtins.filterSource (_: _: true) ./speculative-input",
+            r#""${./speculative-input}""#,
+        ] {
+            let base = crate::sys::path_to_internal(dir.path());
+            let probe = format!(
+                r#"builtins.pathExists (builtins.storeDir + "/{}")"#,
+                sp.base_name()
+            );
+            let expr = format!("[ ({producer}) ({probe}) ({probe}) ]");
+            let ev = crate::eval::EvalConfig::new().pure(false).build();
+            let observed = crate::parallel::try_run(2, ev, move |ev| {
+                let cells = ev
+                    .eval_string(&expr, &base)
+                    .unwrap()
+                    .as_list()
+                    .unwrap()
+                    .cells();
+                ahead(ev, 0..1, |i| &cells[i]);
+                let before = ev.force_cell(&cells[1]).unwrap() == Word::TRUE;
+                ev.force_cell(&cells[0]).unwrap();
+                let after = ev.force_cell(&cells[2]).unwrap() == Word::TRUE;
+                (before, after)
+            })
+            .unwrap();
+            assert_eq!(observed, (false, true), "{producer}");
+        }
+    }
+
+    #[test]
     fn coercion_walk_stops_cancelled_helper() {
         let mut ev = Evaluator::new();
         ev.par.is_main = false;

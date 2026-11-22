@@ -594,6 +594,9 @@ fn add_path_inner(
     expected: Option<Hash>,
     in_store: Option<StorePath>,
 ) -> EvalResult<StorePath> {
+    // A new copy can make a context-free path visible to the evaluator.
+    // Stop before hashing or running the user's filter twice.
+    crate::parallel::force::require_demand(ev)?;
     let name = utf8(name, pos)?;
     let refs = references(ev, in_store);
     coerce::store_path_recopy(ev, path, pos)?;
