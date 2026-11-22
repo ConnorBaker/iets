@@ -916,6 +916,36 @@ mod tests {
     use std::{fs, process};
 
     #[test]
+    fn dumping_a_derivation_follows_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let ev = EvalConfig::new().dump_dir(dir.path().to_owned()).build();
+        let states = try_run(2, ev, move |ev| {
+            let state = |ev: &Evaluator| {
+                (
+                    ev.drv.hash_cache.lock().unwrap().len(),
+                    ev.drv.drvs.lock().len(),
+                    fs::read_dir(dir.path()).unwrap().count(),
+                )
+            };
+            let v = ev
+                .eval_string(
+                    r#"[ (builtins.derivationStrict {
+                  name = "test-demand"; builder = "/bin/sh"; system = "test";
+                }).drvPath ]"#,
+                    b"/",
+                )
+                .unwrap();
+            let cells = v.as_list().unwrap().cells();
+            ahead(ev, 0..1, |i| &cells[i]);
+            let before = state(ev);
+            ev.force_cell(&cells[0]).unwrap();
+            (before, state(ev))
+        })
+        .unwrap();
+        assert_eq!(states, ((0, 0, 0), (1, 1, 1)));
+    }
+
+    #[test]
     fn returned_thunk_retries_after_a_parked_helper_is_cancelled() {
         fn wait_until(done: impl Fn() -> bool) {
             let start = Instant::now();
