@@ -143,6 +143,11 @@ impl fmt::Display for StorePath {
     }
 }
 
+/// A byte a store path's base name may hold (path.cc:checkName).
+pub(crate) fn is_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.' | b'_' | b'?' | b'=')
+}
+
 /// Mirrors path.cc:checkName.
 pub fn check_name(name: &str) -> Result<(), StorePathError> {
     if name.is_empty() {
@@ -154,28 +159,20 @@ pub fn check_name(name: &str) -> Result<(), StorePathError> {
         )));
     }
     let b = name.as_bytes();
-    if b[0] == b'.' {
-        if b.len() == 1 {
-            return Err(StorePathError(format!("name '{name}' is not valid")));
-        }
-        if b[1] == b'-' {
-            return Err(StorePathError(format!(
-                "name '{name}' is not valid: first dash-separated component must not be '.'"
-            )));
-        }
-        if b[1] == b'.' {
-            if b.len() == 2 {
+    for component in [".", ".."] {
+        if let Some(rest) = name.strip_prefix(component) {
+            if rest.is_empty() {
                 return Err(StorePathError(format!("name '{name}' is not valid")));
             }
-            if b[2] == b'-' {
+            if rest.starts_with('-') {
                 return Err(StorePathError(format!(
-                    "name '{name}' is not valid: first dash-separated component must not be '..'"
+                    "name '{name}' is not valid: first dash-separated component must not be '{component}'"
                 )));
             }
         }
     }
     for &c in b {
-        if !(c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.' | b'_' | b'?' | b'=')) {
+        if !is_name_byte(c) {
             return Err(StorePathError(format!(
                 "name '{name}' contains illegal character '{}'",
                 c as char
