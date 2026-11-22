@@ -28,8 +28,9 @@ fn main() -> ExitCode {
 mod ab {
     use std::env;
     use std::fs::{self, File};
-    use std::io::{self, BufRead, BufReader, Read};
+    use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
     use std::mem::MaybeUninit;
+    use std::os::unix::fs::OpenOptionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command, ExitCode, Stdio};
     use std::ptr;
@@ -554,6 +555,34 @@ mod ab {
         }
     }
 
+    fn cleanup_error(error: io::Error, stderr: &Path) -> RunError {
+        // A surviving process may still write or replace the path. Read only
+        // the final snapshot of a regular file, never wait for an EOF.
+        let tail = (|| -> io::Result<String> {
+            const LIMIT: u64 = 4096;
+            let mut file = File::options()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+                .open(stderr)?;
+            let meta = file.metadata()?;
+            if !meta.is_file() {
+                return Ok(String::new());
+            }
+            let start = meta.len().saturating_sub(LIMIT);
+            file.seek(SeekFrom::Start(start))?;
+            let mut bytes = Vec::new();
+            file.take(meta.len() - start).read_to_end(&mut bytes)?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        })();
+        match tail {
+            Ok(text) if !text.is_empty() => RunError::Cleanup(io::Error::new(
+                error.kind(),
+                format!("{error}\nworkload stderr (tail):\n{text}"),
+            )),
+            _ => RunError::Cleanup(error),
+        }
+    }
+
     fn run_once(bin: &Path, args: &[String], cache: &Path, stderr: &Path) -> Result<Run, RunError> {
         // a thread of its own, so the counters it opens cover only the run
         thread::scope(|s| {
@@ -617,7 +646,7 @@ mod ab {
         // Failed cleanup stops the campaign without joining an inherited pipe reader.
         // Confirmed cleanup retains the ordinary scenario failure path below.
         let clean = reap_leftovers(LEFTOVER_LIMIT, CLEANUP_GRACE, kill_leftovers)
-            .map_err(RunError::Cleanup)?;
+            .map_err(|error| cleanup_error(error, stderr))?;
         let out = hasher.join().expect("the hash thread");
         let used: Vec<f64> = children().iter().zip(before).map(|(a, b)| a - b).collect();
         #[cfg(target_os = "linux")]
