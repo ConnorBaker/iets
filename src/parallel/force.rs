@@ -864,7 +864,7 @@ pub fn import_thunk(ev: &mut Evaluator, resolved: &[u8], pos: Pos) -> Word {
 fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> {
     let resolved = args[0].as_string().expect("path string").bytes;
     let pos = Pos(args[1].imm_int_value() as u32);
-    let t0 = SAMPLE_POS.load(Ordering::Relaxed).then(Instant::now);
+    let t0 = (ev.par.on && ev.session().settings().par_stats >= 2).then(Instant::now);
     let src = ev.read_source(resolved, pos)?;
     let dir = eval::dir_of(resolved).to_vec();
     let ir = ev.compile_file(resolved, src, &dir)?;
