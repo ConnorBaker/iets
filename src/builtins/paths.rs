@@ -386,7 +386,7 @@ fn read_dir(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     ];
     let mut entries = Vec::with_capacity(listing.len());
     for (name, t) in listing {
-        entries.push((ev.sym(&name), Pos::NONE, names[t as usize]));
+        entries.push((ev.dynamic_sym(&name)?, Pos::NONE, names[t as usize]));
     }
     let r = ev.mk_attrs(&mut entries, pos)?;
     if trace::fine::on()
