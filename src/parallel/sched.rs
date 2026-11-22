@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 use std::thread::{self, Builder, JoinHandle};
 use std::time::{Duration, Instant};
-use std::{hint, process, ptr};
+use std::{hint, mem, process, ptr};
 
 use super::deque::Deque;
 use super::fiber::{self, Fiber};
@@ -293,14 +293,18 @@ impl Runtime {
     /// Run `entry` in the main fiber on this thread (worker 0), draining
     /// other work while it is parked. Returns when `entry` has returned.
     /// Fails only when the main fiber's own stack cannot be reserved.
-    fn run_main(&'static self, user: *mut (), entry: MainEntry) -> Result<(), fiber::StackError> {
+    fn run_main(
+        &'static self,
+        w: &mut Worker,
+        user: *mut (),
+        entry: MainEntry,
+    ) -> Result<(), fiber::StackError> {
         if Session::current().settings().par_stats >= 2 {
             force::SAMPLE_POS.store(true, Ordering::Relaxed);
             let _ = force::START.set(Instant::now());
             self.spawn_timeline();
         }
         fiber::install_overflow_handler();
-        let mut w = Worker::new(0);
         // the demand path keeps the stack it has at one worker
         let slot = match self.new_slot(fiber::MAIN_STACK, || user) {
             Ok(s) => s,
@@ -315,19 +319,19 @@ impl Runtime {
             (*slot).main_entry = Some(entry);
             (*slot).fiber.reset(slot_entry, slot as *mut ());
         }
-        self.run_slot(&mut w, slot);
-        self.drain_loop(&mut w, || self.main_done.load(Ordering::Acquire));
+        self.run_slot(w, slot);
+        self.drain_loop(w, || self.main_done.load(Ordering::Acquire));
         Ok(())
     }
 
     /// Stops the helpers and frees every slot: its fiber stack and its
-    /// payload. Returns the number of fibers that were parked in the middle
-    /// of a task; whatever their frames own on the Rust heap is lost.
+    /// payload. Evaluator helpers return through their canceled wait. Other
+    /// drivers may leave parked frames; return how many were abandoned.
     ///
     /// # Safety
     /// The main fiber has returned, or never started, and nothing holds a
     /// slot pointer or a reference to this runtime past this call.
-    unsafe fn teardown(&'static self) -> usize {
+    unsafe fn teardown(&'static self, finish_cancelled: Option<&mut Worker>) -> usize {
         for &s in self.all.lock().unwrap().iter() {
             // SAFETY: slots live until the loop below; atomics only.
             unsafe { (*s).cancel.store(true, Ordering::Release) };
@@ -337,8 +341,24 @@ impl Runtime {
         for t in self.threads.lock().unwrap().drain(..) {
             let _ = t.join();
         }
+        let slots = mem::take(&mut *self.all.lock().unwrap());
+        if let Some(w) = finish_cancelled {
+            // No worker remains. A ready entry may still point at any
+            // suspended slot; use the unique inventory, never that queue.
+            for &s in &slots {
+                // SAFETY: all slots remain allocated until this pass ends.
+                let slot = unsafe { &*s };
+                if matches!(
+                    slot.fiber.state.load(Ordering::Acquire),
+                    fiber::SUSPENDED | fiber::RUNNABLE
+                ) {
+                    slot.cancel.store(true, Ordering::Release);
+                    self.run_slot(w, s);
+                }
+            }
+        }
         let mut parked = 0;
-        for s in self.all.lock().unwrap().drain(..) {
+        for s in slots {
             // SAFETY: every thread that ran a fiber has been joined, so
             // this thread owns every slot, and no fiber resumes again.
             let slot = unsafe { Box::from_raw(s) };
@@ -882,11 +902,23 @@ impl Handle {
     /// helper thread has exited and the runtime, its fibers and their
     /// payloads are freed.
     pub fn run_main(self, user: *mut (), entry: MainEntry) -> Result<(), fiber::StackError> {
+        self.run(user, entry, false)
+    }
+
+    /// Only the evaluator's wait protocol guarantees that a canceled
+    /// suspended helper returns without parking again.
+    pub(super) fn run(
+        self,
+        user: *mut (),
+        entry: MainEntry,
+        finish_cancelled: bool,
+    ) -> Result<(), fiber::StackError> {
         let rt = self.0;
-        let r = rt.run_main(user, entry);
+        let mut worker = Worker::new(0);
+        let r = rt.run_main(&mut worker, user, entry);
         // SAFETY: the main fiber returned or never started; `Handle` was the
         // last reference outside the runtime's own threads and slots.
-        let parked = unsafe { rt.teardown() };
+        let parked = unsafe { rt.teardown(finish_cancelled.then_some(&mut worker)) };
         if Session::current().settings().par_stats >= 1 && parked > 0 {
             errln!("parallel: teardown dropped {parked} parked fibers");
         }
