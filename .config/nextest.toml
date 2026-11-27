@@ -13,3 +13,15 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 [[profile.default.overrides]]
 filter = "test(/concurrent_eval_matches_sequential_eval/)"
 threads-required = 4
+
+# Run the four-slot cases first so the long profiling test can overlap the
+# remaining single-slot tests on the Windows ARM runner.
+[[profile.default.overrides]]
+platform = "aarch64-pc-windows-msvc"
+filter = "test(/concurrent_eval_matches_sequential_eval/)"
+priority = 2
+
+[[profile.default.overrides]]
+platform = "aarch64-pc-windows-msvc"
+filter = "binary(profile) & test(=a_builtin_keeps_the_time_it_spends_without_calls)"
+priority = 1
