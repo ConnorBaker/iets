@@ -468,6 +468,29 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_demand_survives_a_host_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut evaluator = crate::eval::EvalConfig::default().pure(false).build();
+        let mut e = Eval::new(&mut evaluator);
+        let root = e.eval_expr(
+            b"let x = builtins.readFile ./input; in { first = x; again = x; fresh = builtins.readFile ./input; }",
+            &crate::sys::path_to_internal(dir.path()),
+        ).unwrap();
+        let first = e.attr(root, b"first").unwrap().unwrap();
+        let error = e.force(first).unwrap_err();
+        assert_eq!(error.kind, crate::eval::ErrorKind::Io);
+        std::fs::write(dir.path().join("input"), "now present").unwrap();
+        let again = e.attr(root, b"again").unwrap().unwrap();
+        let second = e.force(again).unwrap_err();
+        assert_eq!((error.kind, error.msg), (second.kind, second.msg));
+        let fresh = e.attr(root, b"fresh").unwrap().unwrap();
+        assert_eq!(
+            e.force(fresh).unwrap().as_bytes(),
+            Some(&b"now present"[..])
+        );
+    }
+
+    #[test]
     fn wrong_type_is_an_error() {
         eval("1", |e, v| {
             let v = e.force(v).unwrap();

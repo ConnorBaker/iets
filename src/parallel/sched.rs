@@ -204,10 +204,9 @@ pub struct Runtime {
     stack_size: usize,
     tune: Tuning,
     pub waiters: WaiterTable,
-    /// Thunks whose evaluation failed, for helpers to skip. A failure is
-    /// not memoised (Nix evaluates a failed thunk again at every force),
-    /// so this table only stops the speculation: every cell of a fan-out
-    /// would otherwise start the same failing computation again.
+    /// Thunks whose speculative evaluation failed. A helper leaves the
+    /// actual failure and its caller frames to the demand path. This table
+    /// stops other helpers from repeating the same speculative work.
     failed: [AtomicU64; FAILED_SLOTS],
     pub deadlocks: AtomicUsize,
     pub stat_steals: AtomicUsize,

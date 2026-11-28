@@ -1376,7 +1376,7 @@ impl Evaluator {
 
     #[cold]
     pub(crate) fn failed_thunk_state(&self, payload: Word, err: &mut Error) -> Word {
-        if err.is_catchable() {
+        if err.memoizable_on_demand() {
             Word::failed(self.session.failed_thunks.record(err))
         } else {
             payload

@@ -290,15 +290,17 @@ returned.
 ### Failed thunks
 
 Since Nix 2.34 a caught exception from a shared thunk preserves the trace
-of its first demand. iets saves throws and failed assertions in the
-session. A later demand gets a copy of that exception, so it can add its
-own caller frames without changing the trace another demand will see.
+of its first demand. iets saves demanded evaluation failures, including
+throws, assertions, type errors and failed file reads, within the session.
+A later demand gets a copy of that exception, so it can add its own caller
+frames without changing the trace another demand will see.
 Effects such as `builtins.trace` run only on the first demand.
 
 Helpers reset a failing thunk and note it in a small direct-mapped table.
 A helper that meets it abandons its task so the demand path supplies the
-observable effects and caller frames. Cancellation and other engine
-errors leave the payload available for another force.
+observable effects and caller frames. Helper cancellation, stack limits,
+unsupported operations and lint policy errors leave the payload available
+for another force.
 
 ### Stack limits
 

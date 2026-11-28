@@ -182,6 +182,18 @@ impl Error {
         );
     }
 
+    /// Scheduler cancellation, engine stack limits, host lint policy and
+    /// fallback to Nix leave the thunk available for a later demand.
+    pub(crate) fn memoizable_on_demand(&self) -> bool {
+        !matches!(
+            self.kind,
+            ErrorKind::Cancelled
+                | ErrorKind::StackOverflow
+                | ErrorKind::Lint
+                | ErrorKind::Unsupported
+        )
+    }
+
     /// Errors that `tryEval` turns into `{ success = false; }`.
     pub fn is_catchable(&self) -> bool {
         matches!(self.kind, ErrorKind::Throw | ErrorKind::Assert)

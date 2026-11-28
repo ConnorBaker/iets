@@ -335,8 +335,9 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
             if !ev.par.is_main && e.kind != ErrorKind::Cancelled {
                 slot_ref(ev).runtime().note_failed(key);
                 // The first demand supplies the exception's caller frames.
-                // A speculative tryEval must leave that demand for main.
-                if e.is_catchable() {
+                // A helper must leave that demand for main, even when a
+                // caller such as tryEval can catch this error.
+                if e.memoizable_on_demand() {
                     ev.par.cancelled = true;
                     e = cancelled();
                 }
