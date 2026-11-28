@@ -471,7 +471,7 @@ impl SharedMap<StorePath, Known> {
 
     pub fn all_fetched(&self) -> HashMap<StorePath, Arc<Fetched>> {
         (self.lock().iter())
-            .filter_map(|(p, k)| Some((p.clone(), k.fetched.clone()?)))
+            .filter_map(|(p, k)| k.fetched.clone().map(|v| (p.clone(), v)))
             .collect()
     }
 
@@ -520,7 +520,7 @@ impl SharedMap<StorePath, Known> {
         self.lock()
             .iter()
             .filter(|(_, k)| k.origin.as_ref().and_then(|o| o.at.local()).is_none())
-            .filter_map(|(p, k)| Some((p.clone(), k.flake.clone()?)))
+            .filter_map(|(p, k)| k.flake.clone().map(|v| (p.clone(), v)))
             .collect()
     }
 
@@ -528,7 +528,7 @@ impl SharedMap<StorePath, Known> {
     pub fn origins(&self) -> HashMap<StorePath, SourceOrigin> {
         self.lock()
             .iter()
-            .filter_map(|(p, k)| Some((p.clone(), k.origin.clone()?)))
+            .filter_map(|(p, k)| k.origin.clone().map(|v| (p.clone(), v)))
             .collect()
     }
 }
