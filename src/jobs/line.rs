@@ -221,7 +221,7 @@ fn render_fields(fields: &[(&str, Vec<u8>)]) -> Vec<u8> {
             out.push(b',');
         }
         first = false;
-        out.extend(json_str(k));
+        serde_json::to_writer(&mut out, k).expect("string to JSON");
         out.push(b':');
         out.extend_from_slice(v);
     }
