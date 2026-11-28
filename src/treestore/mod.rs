@@ -659,6 +659,9 @@ mod tests {
     use crate::store::hash::{HashAlgo, hash_bytes};
     use crate::store::nar::dump_string;
     use crate::store::source::SrcPath;
+    #[cfg(unix)]
+    use crate::sys::fs::symlink;
+    use crate::trace::validate;
 
     #[test]
     fn a_staged_directory_goes_when_it_is_dropped() {
@@ -856,7 +859,7 @@ mod tests {
         record(&ev, &stored, &name);
         let mut reads = ev.trace().take();
         assert_eq!(reads.len(), 1);
-        let validate = |reads: &mut [Obs]| crate::trace::validate::validate(reads, 1).is_ok();
+        let validate = |reads: &mut [Obs]| validate::validate(reads, 1).is_ok();
         assert!(
             !validate(&mut reads),
             "another decodable index under the same name"
@@ -887,7 +890,7 @@ mod tests {
         {
             let target = dir.path().join("elsewhere");
             fs::write(&target, &original).unwrap();
-            std::os::unix::fs::symlink(target, &path).unwrap();
+            symlink(target, &path).unwrap();
             assert!(!validate(&mut reads), "do not follow a replacement symlink");
             fs::remove_file(&path).unwrap();
         }
