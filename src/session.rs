@@ -22,6 +22,7 @@ use crate::events::Events;
 use crate::ignored::Ignored;
 use crate::jobs::Run;
 use crate::log::Log;
+use crate::parallel::force::Pending;
 use crate::profile::Profile;
 use crate::provenance::SourceMap;
 use crate::runtime::heap::Heap;
@@ -51,6 +52,8 @@ pub struct Session {
     pub trees: treestore::Store,
     /// The `eval-jobs` walk of this run (`crate::jobs`).
     pub jobs: Run,
+    /// Findings on completed speculative thunks, which live in this session's heap.
+    pub(crate) pending_effects: Pending,
     /// nix.conf, read once per run: it cannot change under an evaluation.
     pub nix_conf: OnceLock<config::Config>,
     /// References reported by this session's eval store.

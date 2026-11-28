@@ -1343,6 +1343,10 @@ impl Evaluator {
             );
         }
         if !w.thunk_unforced(st) {
+            if st == Word::SPECULATED_FX {
+                state.set(Word::EMPTY);
+                parallel::force::release(self, state);
+            }
             return Ok(w.thunk_value());
         }
         state.set(Word::BLACKHOLE);

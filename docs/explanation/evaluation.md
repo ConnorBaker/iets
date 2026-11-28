@@ -262,10 +262,11 @@ Against the same tree with helper unboxing put back, this costs 3.2 % of the
 instructions on nixos-server at four workers. At one worker there is no
 helper, so it costs nothing.
 
-A lint finding is not a value and is held back instead. One a helper
-produced is parked on the innermost thunk the helper was forcing
-(`parallel::force::defer`). The demand path runs it when it takes that
-thunk's value and drops it otherwise. Cancelling the helper, as `trace` does, was measured at 15 % of the wall
+A helper parks each lint finding on the innermost thunk it was forcing.
+The session keeps the finding with that thunk, so taking its value after
+`parallel::try_run` returns still reports it. Releasing the session
+discards findings on thunks that were never demanded.
+Cancelling the helper, as `trace` does, was measured at 15 % of the wall
 for lints, and turning the fan-out off in the builtins that stop early costs
 37 % at four workers, so neither is the answer.
 

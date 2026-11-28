@@ -2,10 +2,9 @@
 //! handshake. Evaluator-agnostic: the `Driver` supplies the per-fiber
 //! payload and runs tasks.
 
-use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, Builder, JoinHandle};
 use std::time::{Duration, Instant};
 use std::{hint, process, ptr};
@@ -197,9 +196,9 @@ pub struct Runtime {
     next_id: AtomicU32,
     all: Mutex<Vec<*mut Slot>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
-    /// Effects held back by `force::defer`, by thunk address. Per runtime,
-    /// so a run that ends drops the effects nothing took.
-    pub(crate) pending: Mutex<HashMap<u64, Vec<force::Effect>>>,
+    /// User callbacks last only until this runtime returns. A thunk's journal
+    /// can outlive it and holds a weak reference to this table.
+    pub(crate) callbacks: OnceLock<Arc<force::Callbacks>>,
     driver: Box<dyn Driver>,
     stack_size: usize,
     tune: Tuning,
@@ -263,7 +262,7 @@ impl Runtime {
             next_id: AtomicU32::new(1),
             all: Mutex::new(Vec::new()),
             threads: Mutex::new(Vec::new()),
-            pending: Mutex::new(HashMap::new()),
+            callbacks: Default::default(),
             driver,
             stack_size,
             tune: Tuning::read(n),
@@ -357,7 +356,6 @@ impl Runtime {
                 self.driver.drop_user(slot.user);
             }
         }
-        self.pending.lock().unwrap().clear();
         parked
     }
 

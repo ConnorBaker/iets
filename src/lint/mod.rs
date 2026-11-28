@@ -758,13 +758,34 @@ const FLUSH_AT: usize = 16 << 10;
 
 type SiteSet = HashSet<(LintId, Pos), BuildHasherDefault<FxHasher>>;
 
-struct Emitted {
+pub(crate) struct Finding {
+    /// Positions are local to the file table that produced the finding.
+    sites: Arc<Mutex<Sites>>,
+    id: LintId,
+    pos: Pos,
+    line: String,
+    site: Option<Site>,
+    tree: Option<String>,
+}
+
+#[derive(Default)]
+struct Sites {
     seen: SiteSet,
-    /// One record for each warning, as a cache entry keeps them.
-    records: Vec<String>,
     /// The trees that have their finding of `rev-count`.
     counted: Vec<String>,
+}
+
+#[derive(Default)]
+struct Emitted {
+    /// One record for each warning, as a cache entry keeps them.
+    records: Vec<String>,
     pending: Vec<u8>,
+}
+
+#[derive(Default)]
+struct Shared {
+    sites: Arc<Mutex<Sites>>,
+    emitted: Mutex<Emitted>,
 }
 
 impl Emitted {
@@ -784,9 +805,9 @@ impl Drop for Emitted {
 
 /// The warnings a run emitted. Clones share the emitted set, so every fiber
 /// deduplicates against the same sites.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Lints {
-    shared: Arc<Mutex<Emitted>>,
+    shared: Arc<Shared>,
     /// Sites this fiber saw reported or silenced: a hit skips the shared
     /// lock, and a firing site is evaluated many times more than it is
     /// reported.
@@ -795,39 +816,24 @@ pub struct Lints {
     where_cache: FxHashMap<u32, Where>,
 }
 
-impl Default for Lints {
-    fn default() -> Lints {
-        Lints {
-            shared: Arc::new(Mutex::new(Emitted {
-                seen: SiteSet::default(),
-                records: Vec::new(),
-                counted: Vec::new(),
-                pending: Vec::new(),
-            })),
-            local_seen: SiteSet::default(),
-            where_cache: FxHashMap::default(),
-        }
-    }
-}
-
 impl Lints {
     /// The record of every warning emitted so far, in order.
     pub fn records(&self) -> Vec<String> {
-        self.shared.lock().unwrap().records.clone()
+        self.shared.emitted.lock().unwrap().records.clone()
     }
 
     /// Writes the buffered warnings to stderr. `parallel::try_run` flushes at
     /// the end of every command, `report` before an error, `trace` and
     /// `warn` before their own line, and the last clone on drop.
     pub fn flush(&self) {
-        self.shared.lock().unwrap().flush();
+        self.shared.emitted.lock().unwrap().flush();
     }
 
     fn seen(&mut self, id: LintId, pos: Pos) -> bool {
         if self.local_seen.contains(&(id, pos)) {
             return true;
         }
-        if self.shared.lock().unwrap().seen.contains(&(id, pos)) {
+        if self.shared.sites.lock().unwrap().seen.contains(&(id, pos)) {
             self.local_seen.insert((id, pos));
             return true;
         }
@@ -837,34 +843,38 @@ impl Lints {
     /// A site outside the scope: seen, so no fiber classifies it again.
     fn silence(&mut self, id: LintId, pos: Pos) {
         self.local_seen.insert((id, pos));
-        self.shared.lock().unwrap().seen.insert((id, pos));
+        self.shared.sites.lock().unwrap().seen.insert((id, pos));
     }
 
     /// Records the finding and queues its line; false when another fiber
     /// recorded it first. A finding of `tree` is the one of that tree in the
     /// run, with a site or without; every other finding is the one of its
     /// site.
-    fn record(
-        &mut self,
-        id: LintId,
-        pos: Pos,
-        line: &str,
-        site: Option<Site>,
-        tree: Option<&str>,
-    ) -> bool {
-        let mut g = self.shared.lock().unwrap();
-        let first = match tree {
-            Some(t) => !g.counted.iter().any(|c| c == t),
+    pub(crate) fn record(&mut self, finding: Finding) -> bool {
+        let Finding {
+            sites,
+            id,
+            pos,
+            line,
+            site,
+            tree,
+        } = finding;
+        let mut origin = sites.lock().unwrap();
+        let first = match &tree {
+            Some(t) => !origin.counted.iter().any(|c| c == t),
             None => {
-                self.local_seen.insert((id, pos));
-                g.seen.insert((id, pos))
+                if Arc::ptr_eq(&sites, &self.shared.sites) {
+                    self.local_seen.insert((id, pos));
+                }
+                origin.seen.insert((id, pos))
             }
         };
         if !first {
             return false;
         }
-        g.counted.extend(tree.map(String::from));
-        let (shown, record) = log::lint(line, site);
+        origin.counted.extend(tree);
+        let mut g = self.shared.emitted.lock().unwrap();
+        let (shown, record) = log::lint(&line, site);
         g.pending.extend_from_slice(shown.as_bytes());
         g.pending.push(b'\n');
         g.records.push(record);
@@ -1103,9 +1113,17 @@ impl Evaluator {
         let tree = tree.map(String::from);
         // a helper may reach a site the program never asks for; the
         // finding then waits for the thunk whose value carries it
-        parallel::defer(self, move |ev| {
-            ev.lints.record(id, pos, &line, site, tree.as_deref());
-        });
+        parallel::force::defer_finding(
+            self,
+            Finding {
+                sites: self.lints.shared.sites.clone(),
+                id,
+                pos,
+                line,
+                site,
+                tree,
+            },
+        );
     }
 
     /// The byte span of the site and its edit (`site::finding`), from a

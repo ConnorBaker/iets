@@ -2,9 +2,11 @@
 //! fiber an `Evaluator`, the parallel `force_thunk`, strict-demand fan-out,
 //! and the range tasks helpers run.
 
+use std::collections::HashMap;
 use std::mem;
 use std::ops::Range;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use super::sched::{self, Driver, Runtime, Slot, Task, Worker};
@@ -12,6 +14,7 @@ use super::thunk::{self, Claim};
 use super::{Ctx, fiber};
 use crate::eval::{self, Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::jobs;
+use crate::lint::Finding;
 use crate::runtime::{AttrsObj, Cell, Kind, ListObj, Value, Word};
 use crate::syntax::symbol::FxHashSet;
 
@@ -224,7 +227,7 @@ fn read_speculated(ev: &mut Evaluator, cell: &Cell, st: Word) {
     if ev.par.is_main {
         cell.set(Word::EMPTY);
         if st == Word::SPECULATED_FX {
-            release(ev, cell as *const Cell as u64);
+            release(ev, cell);
         }
     } else if st == Word::SPECULATED_FX && ev.par.frames != 0 {
         ev.par.fx.0.push(Effect::Read(cell as *const Cell as u64));
@@ -343,12 +346,25 @@ fn claim_and_run(ev: &mut Evaluator, w: Word, cell: &'static Cell) -> EvalResult
 #[cold]
 fn park(ev: &mut Evaluator, key: u64, mark: usize) {
     let fx = ev.par.fx.0.split_off(mark);
-    slot_ref(ev)
-        .runtime()
-        .pending
+    let steps = fx
+        .into_iter()
+        .enumerate()
+        .map(|(i, effect)| match effect {
+            Effect::Run(f) => {
+                let callbacks = slot_ref(ev).runtime().callbacks.get_or_init(Arc::default);
+                callbacks.lock().unwrap().insert((key, i), f);
+                Effect::Run(Arc::downgrade(callbacks))
+            }
+            Effect::Lint(finding) => Effect::Lint(finding),
+            Effect::Read(child) => Effect::Read(child),
+        })
+        .collect();
+    ev.session()
+        .pending_effects
+        .0
         .lock()
         .unwrap()
-        .insert(key, fx);
+        .insert(key, steps);
     if ev.par.frames != 0 {
         ev.par.fx.0.push(Effect::Read(key));
     }
@@ -373,20 +389,35 @@ pub fn journal(ev: &mut Evaluator) -> bool {
     }
 }
 
-pub(crate) type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;
+type Deferred = Box<dyn FnOnce(&mut Evaluator) + Send>;
+/// The thunk and position of a callback in its ordered effect group.
+pub(crate) type Callbacks = Mutex<HashMap<(u64, usize), Deferred>>;
+type Steps = Vec<Effect<Weak<Callbacks>>>;
+
+/// Only lint data and child keys survive the runtime. A callback can capture
+/// its own session, so its journal step refers weakly to the runtime's table.
+#[derive(Default)]
+pub(crate) struct Pending(Mutex<HashMap<u64, Steps>>);
+
+impl Pending {
+    fn take(&self, key: u64) -> Option<Steps> {
+        self.0.lock().unwrap().remove(&key)
+    }
+}
 
 /// One step of a thunk's effects, in the order its evaluation made it. A
 /// `Read` is the value of another speculated thunk with effects: those run
 /// there, unless an earlier demand already ran them.
-pub(crate) enum Effect {
-    Run(Deferred),
+enum Effect<F> {
+    Run(F),
+    Lint(Box<Finding>),
     Read(u64),
 }
 
 /// The effects of the thunks a helper is forcing (`Ctx::fx`). A clone is a
 /// fresh fiber, which forces nothing.
 #[derive(Default)]
-pub struct Log(Vec<Effect>);
+pub struct Log(Vec<Effect<Deferred>>);
 
 impl Clone for Log {
     fn clone(&self) -> Log {
@@ -394,13 +425,10 @@ impl Clone for Log {
     }
 }
 
-/// Run an effect, or hold it back when a helper produced it. The demand
-/// path runs it at once. A helper parks it on the innermost thunk it is
-/// forcing (`Runtime::pending`), and the demand path runs it when it first
-/// takes that value, directly or through a thunk that read it. Effects
-/// come out in the order of the sequential run, and a warning from work
-/// the program never asks for is never seen. Only for an effect the
-/// program may lose without losing anything it returns.
+/// Run an effect on demand. A helper parks it on the innermost thunk it
+/// forces. Taking that value directly or through a parent runs the callback
+/// in sequential order. Unused callbacks are dropped when this runtime ends.
+/// Only for an effect the program may lose without losing anything it returns.
 pub fn defer(ev: &mut Evaluator, f: impl FnOnce(&mut Evaluator) + Send + 'static) {
     if ev.par.is_main || ev.par.frames == 0 {
         f(ev);
@@ -409,22 +437,40 @@ pub fn defer(ev: &mut Evaluator, f: impl FnOnce(&mut Evaluator) + Send + 'static
     ev.par.fx.0.push(Effect::Run(Box::new(f)));
 }
 
+pub(crate) fn defer_finding(ev: &mut Evaluator, finding: Finding) {
+    if ev.par.is_main || ev.par.frames == 0 {
+        ev.lints.record(finding);
+    } else {
+        ev.par.fx.0.push(Effect::Lint(Box::new(finding)));
+    }
+}
+
 /// The demand path took the value of the thunk at `key`: its effects, and
 /// those of the thunks it read that nothing took before, are now the
 /// program's.
 #[cold]
-fn release(ev: &mut Evaluator, key: u64) {
-    let pending = &slot_ref(ev).runtime().pending;
-    let Some(fx) = pending.lock().unwrap().remove(&key) else {
+pub(crate) fn release(ev: &mut Evaluator, cell: &Cell) {
+    let key = cell as *const Cell as u64;
+    let Some(fx) = ev.session().pending_effects.take(key) else {
         return;
     };
-    let mut stack = vec![fx.into_iter()];
-    while let Some(top) = stack.last_mut() {
+    let mut stack = vec![(key, fx.into_iter().enumerate())];
+    while let Some((key, top)) = stack.last_mut() {
         match top.next() {
-            Some(Effect::Run(f)) => f(ev),
-            Some(Effect::Read(k)) => {
-                if let Some(fx) = pending.lock().unwrap().remove(&k) {
-                    stack.push(fx.into_iter());
+            Some((i, Effect::Run(callbacks))) => {
+                let f = callbacks
+                    .upgrade()
+                    .and_then(|callbacks| callbacks.lock().unwrap().remove(&(*key, i)));
+                if let Some(f) = f {
+                    f(ev);
+                }
+            }
+            Some((_, Effect::Lint(finding))) => {
+                ev.lints.record(*finding);
+            }
+            Some((_, Effect::Read(k))) => {
+                if let Some(fx) = ev.session().pending_effects.take(k) {
+                    stack.push((k, fx.into_iter().enumerate()));
                 }
             }
             None => {
@@ -878,11 +924,150 @@ fn import_raw(ev: &mut Evaluator, args: &[Word], _pos: Pos) -> EvalResult<Word> 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "wasi"))]
+    use std::fs;
     #[cfg(target_pointer_width = "64")]
     use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
     use super::*;
+    #[cfg(not(target_os = "wasi"))]
+    use crate::eval::EvalConfig;
+    #[cfg(not(target_os = "wasi"))]
+    use crate::lint::{Config, Scope};
     use crate::parallel;
+    #[cfg(not(target_os = "wasi"))]
+    use crate::session::Session;
+    #[cfg(not(target_os = "wasi"))]
+    use crate::sys;
+
+    #[cfg(not(target_os = "wasi"))]
+    fn lint_evaluator(session: Arc<Session>) -> Evaluator {
+        let mut lints = Config::off();
+        lints.scope = Scope::All;
+        lints.set_pair("dir-copy-unfiltered=warn").unwrap();
+        lints.set_pair("eq-type-mismatch=warn").unwrap();
+        lints.set_pair("url-literal=warn").unwrap();
+        EvalConfig::new().session(session).lints(lints).build()
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    fn speculate_first(ev: &mut Evaluator, list: Word) -> Word {
+        let cells = list.as_list().unwrap().cells();
+        let first = cells[0].get();
+        ahead(ev, 0..1, |i| &cells[i]);
+        first
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn completed_helper_lints_follow_a_returned_thunk() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("copied")).unwrap();
+        fs::write(dir.path().join("child.nix"), "https://example.org").unwrap();
+        let base = sys::path_to_internal(dir.path());
+        let expr = r#"let shared = builtins.seq (import ./child.nix) (1 == "child");
+            in [ (builtins.seq "${./copied}" (builtins.seq shared (3 == "after"))) shared ]"#;
+        let mut serial = lint_evaluator(Session::new());
+        let list = serial.eval_string(expr, &base).unwrap();
+        serial.force_deep(list).unwrap();
+        let expected = serial.lints.records();
+        assert_eq!(expected.len(), 4);
+
+        for workers in [1, 2] {
+            let original = lint_evaluator(Session::new());
+            let base = base.clone();
+            let (list, completed) = parallel::try_run(2, original.clone(), move |ev| {
+                let list = ev.eval_string(expr, &base).unwrap();
+                let first = speculate_first(ev, list);
+                (list, first.thunk_state_cell().get())
+            })
+            .unwrap();
+            assert_eq!(completed, Word::SPECULATED_FX);
+            assert!(original.lints.records().is_empty());
+            // A second runtime can speculate another parent that only reads the first.
+            let list = if workers == 2 {
+                parallel::try_run(2, original.clone(), move |ev| {
+                    let head = ev.eval_string("builtins.head", b"/").unwrap();
+                    let parent = ev.arena.mk_thunk_app(head, list);
+                    let wrapped = ev.arena.mk_list(&[parent]);
+                    speculate_first(ev, wrapped);
+                    wrapped
+                })
+                .unwrap()
+            } else {
+                list
+            };
+            parallel::try_run(workers, original.clone(), move |ev| {
+                ev.force_deep(list).unwrap();
+                ev.force_deep(list).unwrap();
+            })
+            .unwrap();
+            assert_eq!(original.lints.records(), expected, "{workers} workers");
+        }
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn late_findings_deduplicate_in_the_original_file_table() {
+        let session = Session::new();
+        let first = parallel::try_run(2, lint_evaluator(session.clone()), |ev| {
+            let list = ev.eval_string(r#"[ (1 == "x") ]"#, b"/").unwrap();
+            speculate_first(ev, list)
+        })
+        .unwrap();
+        assert_eq!(first.thunk_state_cell().get(), Word::SPECULATED_FX);
+        let mut other = lint_evaluator(session);
+        // The same offset in another file table has its own finding.
+        let list = other.eval_string("[ (1 == true) ]", b"/").unwrap();
+        other.force_deep(list).unwrap();
+        other.force(first).unwrap();
+        let records = other.lints.records();
+        assert_eq!(records.len(), 2);
+        assert!(records[1].contains("integer with a string"));
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[test]
+    fn deferred_callbacks_end_with_their_runtime() {
+        fn deferred_force(ev: &mut Evaluator, args: &[Word], _: Pos) -> EvalResult<Word> {
+            let session = ev.session().clone();
+            let child = args[0];
+            defer(ev, move |ev| {
+                drop(session);
+                ev.force(child).unwrap();
+            });
+            ev.eval_string("true == []", b"/")
+        }
+
+        for (same_run, later, count) in [(true, false, 2), (false, true, 1), (false, false, 0)] {
+            let mut ev = lint_evaluator(Session::new());
+            let session = Arc::downgrade(ev.session());
+            let thunk = parallel::try_run(2, ev.clone(), move |ev| {
+                let child = ev.eval_string(r#"[ (1 == "x") ]"#, b"/").unwrap();
+                let child = child.as_list().unwrap().cells()[0].get();
+                let name = ev.sym(b"deferredForce");
+                let op = ev.arena.mk_primop("deferredForce", 1, deferred_force, name);
+                let thunk = ev.arena.mk_thunk_app(op, child);
+                let list = ev.arena.mk_list(&[thunk]);
+                speculate_first(ev, list);
+                if same_run {
+                    ev.force(thunk).unwrap();
+                }
+                thunk
+            })
+            .unwrap();
+            if later {
+                ev.force(thunk).unwrap();
+            }
+            let records = ev.lints.records();
+            assert_eq!(records.len(), count);
+            if same_run {
+                assert!(records[0].contains("integer with a string"));
+            }
+            drop(ev);
+            assert!(session.upgrade().is_none());
+        }
+    }
 
     #[test]
     fn coercion_walk_stops_cancelled_helper() {
