@@ -30,7 +30,7 @@ use crate::session::{self, Session};
 use crate::settings::FixHashes;
 use crate::store::path::{StorePath, drv_name};
 use crate::syntax::symbol::FxHashMap;
-use crate::trace::run::{BuildTables, Cache};
+use crate::trace::run::Cache;
 use crate::trace::wire;
 
 #[derive(Default)]
@@ -226,28 +226,18 @@ fn build_once(argv: &[String]) -> i32 {
         run
     };
     if let Some(code) = run.hit(|c| {
-        let BuildTables {
-            roots,
-            drvs,
-            sources,
-            fetched,
-        } = c.read_build()?;
+        let tables = c.read_build()?;
         c.replay_warnings();
         if b.timings {
             eprintln!(
                 "eval: skipped, {} derivations and {} sources from the cache, {:.3}s",
-                drvs.len(),
-                sources.len(),
+                tables.drvs.len(),
+                tables.sources.len(),
                 t0.elapsed().as_secs_f64()
             );
         }
-        let prov = Provenance::from_map(SourceMap::from_sources(&sources));
-        let inputs = Inputs {
-            drvs: &drvs,
-            sources: &sources,
-            fetched: &fetched,
-        };
-        Some(build_roots(&b, &roots, inputs, &prov))
+        let prov = Provenance::from_map(SourceMap::from_sources(&tables.sources));
+        Some(build_roots(&b, &tables.roots, tables.inputs(), &prov))
     }) {
         return code;
     }

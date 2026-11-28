@@ -124,15 +124,9 @@ impl Run {
         self.hit(|c| {
             let t = c.read_build()?;
             let paths: Vec<StorePath> = t.roots.iter().map(|(p, _)| p.clone()).collect();
-            let inputs = build::Inputs {
-                drvs: &t.drvs,
-                sources: &t.sources,
-                fetched: &t.fetched,
-            };
-            let plan = build::plan_with(&paths, inputs).ok()?;
-            let roots = t.roots;
+            let plan = build::plan_with(&paths, t.inputs()).ok()?;
             c.replay_warnings();
-            Some((roots, plan))
+            Some((t.roots, plan))
         })
     }
 

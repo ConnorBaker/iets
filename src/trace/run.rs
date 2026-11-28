@@ -13,6 +13,7 @@ use crate::eval::Evaluator;
 use crate::ignored;
 use crate::lint::Lints;
 use crate::log;
+use crate::remote::plan::Inputs;
 use crate::session::Session;
 use crate::store::narinfo::Fetched;
 use crate::store::path::StorePath;
@@ -28,6 +29,16 @@ pub struct BuildTables {
     pub drvs: FxHashMap<StorePath, DrvInfo>,
     pub sources: HashMap<StorePath, SourceOrigin>,
     pub fetched: HashMap<StorePath, Arc<Fetched>>,
+}
+
+impl BuildTables {
+    pub(crate) fn inputs(&self) -> Inputs<'_> {
+        Inputs {
+            drvs: &self.drvs,
+            sources: &self.sources,
+            fetched: &self.fetched,
+        }
+    }
 }
 
 /// The tracing cache for one run: where the entry lives and its key. See docs/explanation/caching.md.
