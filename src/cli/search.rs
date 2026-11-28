@@ -20,7 +20,6 @@ use crate::parallel::force::{T_ATTRS_WHNF, fanout};
 use crate::runtime::{AttrsObj, Value, Word};
 use crate::sys::{self, OsStringExt};
 use crate::trace::run::Cache;
-use crate::trace::store::Part;
 use crate::{argv, error, log, print};
 use ErrorKind as K;
 
@@ -185,10 +184,7 @@ fn run(mut s: Search, classic: Option<&[String]>) -> i32 {
     let workers = s.cache.workers;
     let s = Arc::new(s);
     let r = Run::on(ec).workers(workers).cached(&key_args(&s), "search");
-    let index = match r.hit(|c| {
-        c.replay_warnings();
-        decode(&c.part(Part::Result)?)
-    }) {
+    let index = match r.hit_result().as_deref().and_then(decode) {
         Some(index) => index,
         None => {
             let run = Arc::clone(&s);
