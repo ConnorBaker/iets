@@ -481,6 +481,48 @@ fn eval_prints_every_attr(bin: Iets) {
 }
 
 #[rstest]
+fn conditional_set_calls_use_the_actual_helper_and_keys(bin: Iets) {
+    let src = r#"let
+      optional = c: a: if c then a else {};
+      different = c: a: if c then { value = 9; } else a;
+      keys = builtins.mapAttrs (_: _: throw "membership forced a member")
+        (builtins.fromJSON ''{"present":1}'');
+    in builtins.seq (keys ? prepare) [
+      (optional (keys ? present) { value = 4; }).value
+      (builtins.attrNames (optional (keys ? missing) { value = throw "unused"; }))
+      (different (keys ? present) { value = 6; }).value
+    ]"#;
+    let o = run(&bin, &["eval", "--no-cache", "--json", "-E", src]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "[4,[],9]");
+}
+
+#[rstest]
+fn conditional_set_calls_preserve_local_demand(bin: Iets, #[values("1", "8")] workers: &str) {
+    // Forcing the field through an alias leaves the local holding a boxed value.
+    let src = r#"let
+      optional = c: value: if c then value else {};
+      run = keys:
+        let alias = { field = keys; };
+        in builtins.seq alias.field (
+          builtins.seq (optional (keys ? wanted) { ok = 1; })
+            (builtins.trace { probe = keys; } true));
+    in run (builtins.mapAttrs (_: _: 1) { wanted = 1; })"#;
+    let run_expr = |expr: &str| {
+        run(
+            &bin,
+            &["eval", "--no-cache", "--workers", workers, "-E", expr],
+        )
+    };
+    let ordinary = run_expr(&src.replace("else {}", "else builtins.seq null {}"));
+    let optional = run_expr(src);
+    assert!(ordinary.status.success(), "{}", stderr(&ordinary));
+    assert!(optional.status.success(), "{}", stderr(&optional));
+    assert_eq!(stdout(&optional), "true");
+    assert_eq!(stderr(&optional), stderr(&ordinary));
+}
+
+#[rstest]
 fn dynamic_selection_preserves_name_and_value_effect_order(
     bin: Iets,
     #[values("a", "revCount")] field: &str,

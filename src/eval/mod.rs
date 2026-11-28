@@ -2408,6 +2408,35 @@ impl Evaluator {
     fn eval_k_apply(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
         node!(Ir::Apply { func, args, pos } = ir);
         let f = self.eval_fast(env, func)?;
+        // WASI charges the intermediate expression and thunk frames against its depth limit.
+        if !cfg!(target_os = "wasi")
+            && let [guard, selected] = *args
+            && let Ir::HasAttr {
+                subject,
+                path: [AttrElemIr::Static(key)],
+            } = guard
+            && let Ir::Attrs(fields) = selected
+            && !fields.rec
+            && fields.dynamic.is_empty()
+            && fields.overrides.is_none()
+            && fields.from.is_empty()
+            && let Some(source) = Self::peek(env, subject)
+            // Evaluating a boxed local publishes the resulting value in its slot.
+            // That update is visible to subsequent uses of the local.
+            && matches!(source.heap_kind(), Some(Kind::Attrs | Kind::AttrsUnion))
+            && let Some(receiver) = source.as_attrs()
+            && self.call_limit.saturating_sub(self.call_depth) > 2
+            && let Some(empty) = Self::conditional_set_else(f)
+        {
+            return self.eval_fast(
+                env,
+                if receiver.get(*key).is_some() {
+                    selected
+                } else {
+                    empty
+                },
+            );
+        }
         if args.len() <= 8 {
             let mut buf: [Word; 8] = [Word::EMPTY; 8];
             for (i, a) in args.iter().enumerate() {
@@ -2418,6 +2447,47 @@ impl Evaluator {
             let v: Vec<Word> = args.iter().map(|a| self.maybe_thunk(env, a)).collect();
             self.apply(f, &v, *pos)
         }
+    }
+
+    /// The fallback of a closed `c: a: if c then a else {}` on the actual callee.
+    fn conditional_set_else(word: Word) -> Option<IrRef> {
+        let Value::Lambda(closure) = word.view() else {
+            return None;
+        };
+        let outer = closure.lam;
+        let Ir::Lambda(inner) = outer.body else {
+            return None;
+        };
+        if !outer.closed
+            || outer.no_env
+            || outer.base != 0
+            || inner.no_env
+            || !matches!(outer.param, ParamIr::Ident)
+            || !matches!(inner.param, ParamIr::Ident)
+        {
+            return None;
+        }
+        let Ir::If {
+            cond, then, else_, ..
+        } = inner.body
+        else {
+            return None;
+        };
+        let empty = match else_ {
+            Ir::Attrs(a) => {
+                a.binds.is_empty()
+                    && a.dynamic.is_empty()
+                    && !a.rec
+                    && a.from.is_empty()
+                    && a.overrides.is_none()
+            }
+            Ir::Const(w) => !w.is_thunk() && w.as_attrs().is_some_and(|a| a.is_empty()),
+            _ => false,
+        };
+        (empty
+            && matches!(cond, Ir::Local { depth, idx: 0 } if *depth == u32::from(inner.base == 0))
+            && matches!(then, Ir::Local { depth: 0, idx } if *idx == inner.base))
+        .then_some(*else_)
     }
 
     #[inline(never)]
