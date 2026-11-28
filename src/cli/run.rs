@@ -8,10 +8,10 @@ use std::sync::atomic::Ordering;
 use std::thread::Builder;
 
 use crate::api::MAIN_STACK;
+use crate::argv::WORKER_ARGS_FROM_PIPE;
 use crate::cli::{self, help};
 use crate::env::Env;
 use crate::error::Error;
-use crate::jobs::collector::ARGS_FROM_PIPE;
 use crate::session::{self, Exit, Session, exit};
 use crate::{log, profile, settings};
 
@@ -43,7 +43,7 @@ fn on_big_stack(f: impl FnOnce() -> i32 + Send + 'static) -> i32 {
 pub fn dispatch(session: &Session, mut argv: Vec<String>, classic: Option<String>) -> i32 {
     // Decode the collector's startup frame before interpreter-wide options.
     // The rest of stdin remains the worker's ordinary request stream.
-    if argv == ["eval-jobs", "--worker", ARGS_FROM_PIPE] {
+    if argv == ["eval-jobs", "--worker", WORKER_ARGS_FROM_PIPE] {
         let mut frame = String::new();
         if let Err(e) = io::stdin().read_line(&mut frame) {
             return Error::io("reading worker arguments", e).report();

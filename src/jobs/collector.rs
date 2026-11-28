@@ -27,6 +27,7 @@ use super::line::{Line, json_str, json_str_list, split_object, stats_json};
 use super::{
     FNV_BASIS, Node, attr_join, error_line, find_along_attr_path, fnv_step, node, validate_names,
 };
+use crate::argv::WORKER_ARGS_FROM_PIPE;
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
 use crate::ignored;
@@ -35,9 +36,6 @@ use crate::print::{lexicographic_entries, lexicographic_order};
 use crate::runtime::Word;
 use crate::session::{self, Session};
 use crate::sys::process;
-
-/// Private startup service when the OS cannot represent the worker arguments.
-pub const ARGS_FROM_PIPE: &str = "--worker-args-from-pipe";
 
 pub const MSG_NEXT: &str = "next";
 pub const MSG_RESTART: &str = "restart";
@@ -230,7 +228,7 @@ impl Proc {
                     || (e.kind() == io::ErrorKind::InvalidInput
                         && args.iter().any(|a| a.as_bytes().contains(&0))) =>
             {
-                let child = Self::start(&exe, &[ARGS_FROM_PIPE.to_string()])
+                let child = Self::start(&exe, &[WORKER_ARGS_FROM_PIPE.to_string()])
                     .map_err(|e| Error::io("spawning worker process", e))?;
                 (child, true)
             }

@@ -9,6 +9,9 @@ use crate::sys::OsStringExt;
 use std::borrow::Cow;
 use std::ffi::OsString;
 
+/// The collector sends an argv rejected by exec over the worker's stdin pipe.
+pub(crate) const WORKER_ARGS_FROM_PIPE: &str = "--worker-args-from-pipe";
+
 const BASE: u32 = 0x10FF00;
 
 pub fn encode(arg: OsString) -> String {
