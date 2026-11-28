@@ -233,6 +233,7 @@ fn cursors(ev: &mut Evaluator, s: &Search, cwd: &[u8]) -> EvalResult<Vec<(Word, 
     let attr = s.what.as_deref().unwrap_or("");
     let args = api::auto_args(ev, &s.c.flags.args, cwd)?;
     if s.expr.is_some() || s.file.is_some() {
+        let attr = if attr == "." { "" } else { attr };
         let root = match &s.expr {
             Some(e) => ev.eval_string(e, cwd)?,
             None => ev.eval_file(&argv::bytes(s.file.as_deref().unwrap_or("")), Pos::NONE)?,

@@ -1075,6 +1075,8 @@ fn nix_search() {
     let mut c = Checks::default();
     let pkgs = s.write("pkgs-search.nix", PKGS);
     let pkgs = pkgs.to_str().unwrap();
+    let dot = f.both("nix", &["search", "-f", pkgs, ".", "^", "--json"]);
+    c.same("nix search at the file root", &dot);
     for (label, a) in [
         ("every package", &["^"][..]),
         ("--json", &["^", "--json"]),
