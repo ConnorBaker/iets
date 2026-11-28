@@ -243,13 +243,18 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 lossy(dir)
             )),
         },
-        // One `stat` per entry, no bytes: the name is the content address, so an
-        // entry that is still there still holds what the run read.
-        Obs::Input { entry, version } => {
-            if treestore::has(entry, *version) {
+        Obs::Input {
+            entry,
+            version,
+            index_hash,
+        } => {
+            if treestore::matches_index(entry, *version, index_hash) {
                 Outcome::Same
             } else {
-                Outcome::Changed(format!("input store entry {} is gone", lossy(entry)))
+                Outcome::Changed(format!(
+                    "input store index {} changed or is unavailable",
+                    lossy(entry)
+                ))
             }
         }
     }

@@ -251,10 +251,15 @@ fn put_obs(e: &mut Enc, o: &Obs) {
             e.u8(query.to_u8());
             e.digest(hash);
         }
-        Obs::Input { entry, version } => {
-            e.u8(7);
+        Obs::Input {
+            entry,
+            version,
+            index_hash,
+        } => {
+            e.u8(11);
             e.bytes(entry);
             e.u8(*version);
+            e.digest(index_hash);
         }
     }
 }
@@ -329,9 +334,11 @@ fn get_obs(d: &mut Dec<'_>) -> R<Obs> {
             query: Query::from_u8(d.u8()?).ok_or(())?,
             hash: d.digest()?,
         },
-        7 => Obs::Input {
+        // Tag 7 carried only a name and version. It cannot validate an index.
+        11 => Obs::Input {
             entry: d.vec()?,
             version: d.u8()?,
+            index_hash: d.digest()?,
         },
         _ => return Err(()),
     })
@@ -838,6 +845,7 @@ mod tests {
             _ => Obs::Input {
                 entry: bytes(tc),
                 version: tc.draw(gs::integers()),
+                index_hash: digest(tc),
             },
         }
     }

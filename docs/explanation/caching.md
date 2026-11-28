@@ -163,6 +163,7 @@ Every primop that looks at the world records one observation.
 | observation | recorded by | validated by |
 |---|---|---|
 | a file's size, mtime, ctime, device, inode and sha256 | `import`, `readFile`, `hashFile`, every `.drv` read | check the target metadata. A different size invalidates the entry. Other metadata changes trigger a rehash |
+| a packed input's index digest | accessing a tree in the local input store | hash its index file, including the index checksum |
 | a directory listing's hash | `readDir` | re-list and rehash |
 | a path's kind | `pathExists`, `readFileType`, the `default.nix` probe, every search-path candidate, every marker the SCM detection probed above a flake directory, a fetched store path that the store has as valid | re-stat |
 | a copied tree's NAR hash and stat hash | `./path` coerced to a string, `builtins.path`, `filterSource`, a flake's working tree, a `path:` input | recompute the stat hash with `lstat` only; on a mismatch re-dump the NAR with the recorded filter and compare. A `path:` input also records its newest mtime, which the evaluation sees as `lastModified`, and the same bytes with another date are a change |
@@ -399,11 +400,11 @@ file system, from an input-store entry's objects, or from memory.
 `/nix/store` is checked first and wins when it has the tree, which changes
 nothing, since the two hold the same bytes by construction.
 
-This also gives the read set a cheap shape. An input-store entry is one observation for the whole tree, because the entry's name is the NAR hash of
-its tree. Validating a whole nixpkgs is one stat call and a version-byte
-comparison, against the 3,513 file observations the same tree would cost
-otherwise. A validated observation also marks the entry as used, at most
-once a day, so the sweep doesn't take an input that is in use.
+The read set keeps one index observation per packed input. It records the
+BLAKE3 digest of the encoded index the evaluator used. A hit streams that
+index once and compares its digest. Index validation reads no packed file
+contents. A matching index is marked as used at most once a day, so the
+sweep keeps inputs that are in use.
 
 Before a process downloads, it takes a lock on that tree's name. A second
 process that needs the same tree prints one line, blocks, and then reads the

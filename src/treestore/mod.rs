@@ -35,6 +35,7 @@
 pub mod pack;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -76,6 +77,7 @@ pub struct StoredTree {
     tree: Tree,
     nar_hash: Hash,
     nar_size: u64,
+    index_hash: [u8; 32],
     /// The read set that last recorded this tree. Independent evaluators can
     /// share the tree through a session. Interleaved recorders may each see a
     /// tree more than once, and `Trace::take` deduplicates those observations.
@@ -83,11 +85,12 @@ pub struct StoredTree {
 }
 
 impl StoredTree {
-    fn new(tree: Tree, nar_hash: Hash, nar_size: u64) -> StoredTree {
+    fn new(tree: Tree, nar_hash: Hash, nar_size: u64, index_hash: [u8; 32]) -> StoredTree {
         StoredTree {
             tree,
             nar_hash,
             nar_size,
+            index_hash,
             recorded_by: AtomicU64::new(0),
         }
     }
@@ -185,6 +188,7 @@ pub fn root() -> Option<PathBuf> {
 }
 
 fn dir_of(name: &str) -> Option<PathBuf> {
+    StorePath::from_base_name(name).ok()?;
     Some(root()?.join(name))
 }
 
@@ -211,13 +215,13 @@ pub fn report_timings() {
 }
 
 /// A readable but invalid entry is `Ok(None)`.
-fn read_entry(path: &Path) -> io::Result<Option<(Node, Hash, u64)>> {
+fn read_entry(path: &Path) -> io::Result<Option<(Node, Hash, u64, [u8; 32])>> {
     let Some((f, _)) = cachefs::try_open_entry(path)? else {
         return Ok(None);
     };
     let mut bytes = Vec::new();
     io::Read::read_to_end(&mut &f, &mut bytes)?;
-    Ok(spool::decode_index(&bytes))
+    Ok(spool::decode_index_with_digest(&bytes))
 }
 
 /// The entry `name` of the store at `root`. One whose index does not decode is
@@ -225,12 +229,13 @@ fn read_entry(path: &Path) -> io::Result<Option<(Node, Hash, u64)>> {
 fn open(root: &Path, packs: Arc<pack::Packs>, name: &str) -> Option<StoredTree> {
     let path = root.join(name);
     match read_entry(&path).ok()? {
-        Some((tree, nar_hash, nar_size)) => {
+        Some((tree, nar_hash, nar_size, index_hash)) => {
             cachefs::touch(&path);
             Some(StoredTree::new(
                 Tree::stored(tree, packs),
                 nar_hash,
                 nar_size,
+                index_hash,
             ))
         }
         None => {
@@ -268,8 +273,7 @@ pub fn get(name: &str) -> Option<Arc<StoredTree>> {
         .clone()
 }
 
-/// Whether the store holds `name`, for the tracing cache: an entry's presence
-/// is the whole observation, because its name is its content address.
+/// Whether an entry of the supported format is present under this name.
 pub fn has(name: &[u8], version: u8) -> bool {
     if version != spool::INDEX_VERSION {
         return false;
@@ -280,11 +284,40 @@ pub fn has(name: &[u8], version: u8) -> bool {
     if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
         return false;
     }
-    // a tracing-cache hit reads nothing out of the entry, so this is the only
-    // thing that keeps the TTL sweep from removing an input that is in use.
-    // `touch` compares the mtime first, so a hit inside the interval writes
-    // nothing (docs/explanation/caching.md)
     cachefs::touch(&path);
+    true
+}
+
+/// Check the selected index against the one the evaluation actually used.
+/// A match also proves its checksum and encoding, without decoding the tree.
+pub(crate) fn matches_index(name: &[u8], version: u8, expected: &[u8; 32]) -> bool {
+    if version != spool::INDEX_VERSION {
+        return false;
+    }
+    let Ok(name) = str::from_utf8(name) else {
+        return false;
+    };
+    let s = session();
+    if let Some(opened) = s.trees.opened.lock().unwrap().get(name)
+        && opened.as_ref().map(|t| &t.index_hash) != Some(expected)
+    {
+        return false;
+    }
+    let Some(path) = dir_of(name) else {
+        return false;
+    };
+    let cachefs::Found::File(f, md) = cachefs::open_entry(&path) else {
+        return false;
+    };
+    let mut hash = blake3::Hasher::new();
+    if hash
+        .update_reader((&f).take(cachefs::MAX_ENTRY + 1))
+        .is_err()
+        || hash.finalize().as_bytes() != expected
+    {
+        return false;
+    }
+    cachefs::touch_open(&f, md.modified().ok());
     true
 }
 
@@ -513,7 +546,7 @@ fn store(
     .map_err(|_| Rejected::Unstorable)?;
     let name = sp.base_name();
     let stored_root = tree.with_ids(&ids);
-    let index = spool::encode_index(&stored_root, (&nar_hash, nar_size));
+    let (index, index_hash) = spool::encode_index_with_digest(&stored_root, (&nar_hash, nar_size));
     {
         // `collect` holds the lock for as long as a compaction takes, so this
         // waits rather than drop a whole download; under it, a pack this tree
@@ -536,7 +569,10 @@ fn store(
         let _ = packs.merge();
     }
     let tree = Tree::stored(stored_root, packs);
-    Ok((name.to_string(), StoredTree::new(tree, nar_hash, nar_size)))
+    Ok((
+        name.to_string(),
+        StoredTree::new(tree, nar_hash, nar_size, index_hash),
+    ))
 }
 
 /// Drops the objects no entry names any more: a pack none of them uses goes,
@@ -579,7 +615,7 @@ pub fn collect(root: &Path, dry_run: bool) -> pack::Collected {
             Err(e) => return skip(&path, e),
         }
         match read_entry(&path) {
-            Ok(Some((tree, _, _))) => spool::object_ids(&tree, &mut live),
+            Ok(Some((tree, _, _, _))) => spool::object_ids(&tree, &mut live),
             Ok(None) if !dry_run => {
                 let _ = fs::remove_file(&path);
             }
@@ -598,10 +634,7 @@ pub fn collect(root: &Path, dry_run: bool) -> pack::Collected {
     })
 }
 
-/// The one observation a read of the tree store leaves in the read set. The
-/// entry's name is the NAR hash of its tree, so its presence, plus the index
-/// version that says the entry can still be read, is the whole check: there is
-/// nothing per file to stat and nothing to rehash (docs/explanation/caching.md).
+/// Record the index that supplied the tree, once per read set.
 pub fn record(ev: &Evaluator, tree: &StoredTree, name: &str) {
     if let Some(id) = ev.trace().readset_id()
         && tree.recorded_by.load(Relaxed) != id
@@ -609,6 +642,7 @@ pub fn record(ev: &Evaluator, tree: &StoredTree, name: &str) {
         ev.trace().record(Obs::Input {
             entry: name.as_bytes().to_vec(),
             version: spool::INDEX_VERSION,
+            index_hash: tree.index_hash,
         });
         tree.recorded_by.store(id, Relaxed);
     }
@@ -800,6 +834,67 @@ mod tests {
         fs::remove_dir_all(root.path()).unwrap();
     }
 
+    #[test]
+    fn input_validation_binds_the_index_the_evaluator_opened() {
+        let dir = tempdir().unwrap();
+        let session = Session::with_env(Env::isolated());
+        let _entered = session.enter();
+        session.set_cache_dir(dir.path().to_str().unwrap());
+        let root = root().unwrap();
+        let name = put_in(&root, &[("a", b"one")]);
+        let path = root.join(&name);
+        let stored = get(&name).unwrap();
+        let ev = EvalConfig::new()
+            .session(session.clone())
+            .trace(true)
+            .build();
+
+        let original = fs::read(&path).unwrap();
+        let replacement =
+            spool::encode_index(&Node::Dir(vec![]), (&stored.nar_hash, stored.nar_size));
+        fs::write(&path, &replacement).unwrap();
+        record(&ev, &stored, &name);
+        let mut reads = ev.trace().take();
+        assert_eq!(reads.len(), 1);
+        let validate = |reads: &mut [Obs]| crate::trace::validate::validate(reads, 1).is_ok();
+        assert!(
+            !validate(&mut reads),
+            "another decodable index under the same name"
+        );
+        let mut other = [Obs::Input {
+            entry: name.as_bytes().to_vec(),
+            version: spool::INDEX_VERSION,
+            index_hash: *blake3::hash(&replacement).as_bytes(),
+        }];
+        assert!(
+            !validate(&mut other),
+            "this session still holds the original tree"
+        );
+
+        fs::write(&path, &original[..2]).unwrap();
+        assert!(!validate(&mut reads), "a truncated regular file");
+        let mut damaged = original.clone();
+        damaged[1] ^= 1;
+        fs::write(&path, damaged).unwrap();
+        assert!(
+            !validate(&mut reads),
+            "unchanged checksum trailer, damaged body"
+        );
+
+        fs::remove_file(&path).unwrap();
+        assert!(!validate(&mut reads), "collected index");
+        #[cfg(unix)]
+        {
+            let target = dir.path().join("elsewhere");
+            fs::write(&target, &original).unwrap();
+            std::os::unix::fs::symlink(target, &path).unwrap();
+            assert!(!validate(&mut reads), "do not follow a replacement symlink");
+            fs::remove_file(&path).unwrap();
+        }
+        fs::write(&path, original).unwrap();
+        assert!(validate(&mut reads), "original index restored");
+    }
+
     fn file_of(bytes: &[u8]) -> Tree {
         let mut spool = spool::Spool::scratch().unwrap();
         io::Write::write_all(&mut spool, bytes).unwrap();
@@ -818,6 +913,7 @@ mod tests {
         let expected = [Obs::Input {
             entry: name.as_bytes().to_vec(),
             version: spool::INDEX_VERSION,
+            index_hash: *blake3::hash(&fs::read(root.join(&name)).unwrap()).as_bytes(),
         }];
         let evaluator = || {
             EvalConfig::new()

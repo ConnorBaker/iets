@@ -57,9 +57,15 @@ pub fn cmd_cache_dump(file: &str) -> i32 {
                 query.argv().join(" "),
                 &hex(hash)[..16]
             )),
-            Obs::Input { entry, version } => {
-                render::line(&format!("input {} v{version}", s(entry)))
-            }
+            Obs::Input {
+                entry,
+                version,
+                index_hash,
+            } => render::line(&format!(
+                "input {} v{version} {}",
+                s(entry),
+                &hex(index_hash)[..16]
+            )),
         }
     }
     0

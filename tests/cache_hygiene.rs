@@ -287,6 +287,13 @@ fn an_entry_that_is_not_a_plain_file_is_refused() {
     ));
 }
 
+/// A proof from an older binary named only the entry and index version.
+#[test]
+fn an_unbound_input_observation_cannot_be_replayed() {
+    let legacy = [7, 1, 7, 1, b'x', spool::INDEX_VERSION];
+    assert!(wire::decode_readset(&legacy).is_none());
+}
+
 /// The child of `an_input_observation_marks_its_entry_as_used`: the input
 /// store is under `XDG_CACHE_HOME`, so this runs in a process of its own.
 #[test]
@@ -297,7 +304,9 @@ fn input_touch_child() {
     let name = name.to_string_lossy().into_owned();
     // prepared first: a store with an entry and no version file is wiped
     let entry = iets::treestore::root().expect("input store").join(&name);
-    fs::write(&entry, b"").expect("entry");
+    let nar = iets::store::hash::hash_bytes(iets::store::hash::HashAlgo::Sha256, b"");
+    let index = spool::encode_index(&spool::Node::Symlink(b"x".to_vec()), (&nar, 1));
+    fs::write(&entry, &index).expect("entry");
     let old = SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60);
     File::options()
         .write(true)
@@ -309,6 +318,7 @@ fn input_touch_child() {
     let mut obs = vec![Obs::Input {
         entry: name.into_bytes(),
         version: spool::INDEX_VERSION,
+        index_hash: *blake3::hash(&index).as_bytes(),
     }];
     iets::trace::validate::validate(&mut obs, 1).expect("the entry is there");
     let now = fs::metadata(&entry)

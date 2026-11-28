@@ -158,11 +158,13 @@ pub const INDEX_VERSION: u8 = 3;
 /// Bytes of the checksum the index ends with.
 const SUM: usize = 8;
 
-/// The index's own checksum. It catches a changed byte before anything reads
-/// what the index says, so no reader ever has to trust the file's shape.
-fn checksum(body: &[u8]) -> [u8; SUM] {
-    let h = blake3::hash(body);
-    h.as_bytes()[..SUM].try_into().expect("eight bytes")
+/// Compute the existing wire checksum and the tracing fingerprint of the whole
+/// encoded index in one pass over its body.
+fn index_digests(body: &[u8]) -> ([u8; SUM], [u8; 32]) {
+    let mut h = blake3::Hasher::new();
+    h.update(body);
+    let checksum: [u8; SUM] = h.finalize().as_bytes()[..SUM].try_into().unwrap();
+    (checksum, *h.update(&checksum).finalize().as_bytes())
 }
 
 fn bad(why: String) -> Error {
@@ -771,21 +773,31 @@ impl Tree {
 /// the lock, so no reader ever hashes the tree again, then the tree with every
 /// file named by its object id. Ends with its own checksum.
 pub fn encode_index(root: &Node, nar: (&Hash, u64)) -> Vec<u8> {
+    encode_index_with_digest(root, nar).0
+}
+
+pub(crate) fn encode_index_with_digest(root: &Node, nar: (&Hash, u64)) -> (Vec<u8>, [u8; 32]) {
     let mut e = Vec::with_capacity(1 << 16);
     e.push(INDEX_VERSION);
     put_bytes(&mut e, nar.0.algo.name().as_bytes());
     put_bytes(&mut e, nar.0.bytes());
     put_u64(&mut e, nar.1);
     put_node(&mut e, root);
-    e.extend_from_slice(&checksum(&e));
-    e
+    let (checksum, digest) = index_digests(&e);
+    e.extend_from_slice(&checksum);
+    (e, digest)
 }
 
 /// The tree, NAR hash and NAR size a stored index holds. `None` on anything
 /// unexpected, so the caller wipes the entry rather than repairing it.
 pub fn decode_index(bytes: &[u8]) -> Option<(Node, Hash, u64)> {
+    decode_index_with_digest(bytes).map(|(node, hash, size, _)| (node, hash, size))
+}
+
+pub(crate) fn decode_index_with_digest(bytes: &[u8]) -> Option<(Node, Hash, u64, [u8; 32])> {
     let body = bytes.len().checked_sub(SUM)?;
-    if checksum(&bytes[..body]) != bytes[body..] {
+    let (checksum, digest) = index_digests(&bytes[..body]);
+    if checksum != bytes[body..] {
         return None;
     }
     let mut d = Idx {
@@ -799,7 +811,7 @@ pub fn decode_index(bytes: &[u8]) -> Option<(Node, Hash, u64)> {
     let nar_hash = Hash::from_bytes(algo, &d.bytes()?).ok()?;
     let nar_size = d.u64()?;
     let root = get_node(&mut d, 0)?;
-    (d.i == body).then_some((root, nar_hash, nar_size))
+    (d.i == body).then_some((root, nar_hash, nar_size, digest))
 }
 
 pub fn object_ids(n: &Node, out: &mut impl Extend<Id>) {
@@ -1471,7 +1483,7 @@ pub(crate) mod tests {
         body.extend_from_slice(&[1, 0, 0]); // size u64::MAX, empty directory
         for (byte, expected) in [(1, Some(u64::MAX)), (2, None), (0x80, None)] {
             body[last] = byte;
-            let bytes = [body.as_slice(), &checksum(&body)].concat();
+            let bytes = [body.as_slice(), &index_digests(&body).0].concat();
             assert_eq!(decode_index(&bytes).map(|(_, _, size)| size), expected);
         }
     }
