@@ -372,6 +372,17 @@ fn input_and_args(
     Ok((v, args))
 }
 
+/// Like Nix's autoArgs.insert_or_assign, only the last binding of each name survives.
+pub(crate) fn last_auto_args(args: &[(String, ArgKind)]) -> Vec<usize> {
+    let mut seen = HashSet::new();
+    let mut last: Vec<_> = (0..args.len())
+        .rev()
+        .filter(|&i| seen.insert(&args[i].0))
+        .collect();
+    last.reverse();
+    last
+}
+
 /// The `--arg`/`--argstr` attrset (`nix-instantiate`'s autoArgs).
 pub fn auto_args(
     ev: &mut Evaluator,
@@ -379,13 +390,8 @@ pub fn auto_args(
     cwd: &[u8],
 ) -> Result<Word, Box<Error>> {
     let mut entries = Vec::new();
-    // common-eval-args.cc keeps autoArgs in a map and insert_or_assign's into
-    // it, so the last `--arg`/`--argstr` of a name is the one that is used
-    let mut seen = HashSet::new();
-    let mut last: Vec<&(String, ArgKind)> =
-        args.iter().rev().filter(|(n, _)| seen.insert(n)).collect();
-    last.reverse();
-    for (name, kind) in last {
+    for i in last_auto_args(args) {
+        let (name, kind) = &args[i];
         let w = match kind {
             ArgKind::Expr(e) => {
                 let ir = ev.compile_source(b"\xc2\xabarg\xc2\xbb", argv::bytes(e), cwd, None)?;

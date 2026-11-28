@@ -18,6 +18,7 @@ use crate::remote::worker::{Connection, Transport};
 use crate::runtime::Word;
 use crate::session::{self, Session};
 use crate::{ignored, log};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
@@ -44,6 +45,8 @@ struct JobsArgs {
     max_memory: u64,
     /// The argv index of each parsed `--arg-from-stdin` and the value it read.
     stdin_args: Vec<(usize, String)>,
+    /// Each source flag in the original argv and its lowered --argstr in the eval argv.
+    sources: Vec<(usize, usize)>,
     worker: bool,
     flake: bool,
     /// Its own flag, not `EvalArgs::pure`: nix-eval-jobs.cc lets it beat `--flake`.
@@ -71,6 +74,7 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
         select: None,
         max_memory: DEFAULT_MAX_MEMORY_MB,
         stdin_args: Vec::new(),
+        sources: Vec::new(),
         worker: false,
         flake: false,
         impure: false,
@@ -134,21 +138,14 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
                 "iets evaluates locked flakes only; an override makes the lock file incomplete",
             ),
             "--repair" => unsupported(s, "iets does not write or repair store paths"),
-            "--arg-from-file" => {
-                let name = arg(&mut i);
-                let path = arg(&mut i);
-                let contents = fs::read_to_string(&path).unwrap_or_else(|e| {
-                    exit(CrateError::io(format!("cannot read '{path}'"), e).report())
-                });
-                rest.extend(["--argstr".to_string(), name, contents]);
-            }
-            "--arg-from-stdin" => {
+            "--arg-from-file" | "--arg-from-stdin" => {
                 let flag = i;
                 let name = arg(&mut i);
-                let contents = io::read_to_string(io::stdin())
-                    .unwrap_or_else(|e| exit(CrateError::io("cannot read stdin", e).report()));
-                rest.extend(["--argstr".to_string(), name, contents.clone()]);
-                j.stdin_args.push((flag, contents));
+                if s == "--arg-from-file" {
+                    arg(&mut i);
+                }
+                j.sources.push((flag, rest.len()));
+                rest.extend(["--argstr".to_string(), name, String::new()]);
             }
             "--include" => {
                 rest.push("-I".to_string());
@@ -159,6 +156,48 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
         i += 1;
     }
     (j, rest)
+}
+
+/// Only the final binding of each name supplies an auto argument. Parse the
+/// ordinary flags first, so their operands never appear to be bindings.
+fn jobs_eval_args(argv: &[String], rest: &[String], j: &mut JobsArgs) -> EvalArgs {
+    if j.sources.is_empty() {
+        return parse_eval_args(rest);
+    }
+    let mut flags = Vec::new();
+    let mut a = cli::parse_eval_args_with_bindings(rest, |flag| flags.push(flag));
+    let winners: HashMap<_, _> = crate::api::last_auto_args(&a.args)
+        .into_iter()
+        .map(|i| (flags[i], i))
+        .collect();
+    // Nix reads the surviving sources in the name order of its autoArgs map.
+    j.sources
+        .sort_by_cached_key(|&(flag, _)| crate::argv::bytes(&argv[flag + 1]));
+    for (flag, forwarded) in j.sources.drain(..) {
+        let selected = winners.get(&forwarded);
+        let stdin = argv[flag] == "--arg-from-stdin";
+        let mut contents = String::new();
+        if selected.is_some() {
+            contents = if stdin {
+                io::read_to_string(io::stdin())
+                    .unwrap_or_else(|e| exit(CrateError::io("cannot read stdin", e).report()))
+            } else {
+                let path = &argv[flag + 2];
+                fs::read_to_string(path).unwrap_or_else(|e| {
+                    exit(CrateError::io(format!("cannot read '{path}'"), e).report())
+                })
+            };
+        }
+        if stdin {
+            j.stdin_args.push((flag, contents.clone()));
+        }
+        if let Some(&i) = selected {
+            a.args[i].1 = crate::api::ArgKind::Str(contents);
+        }
+    }
+    // Worker argv replacements are spliced in the original command-line order.
+    j.stdin_args.sort_unstable_by_key(|(flag, _)| *flag);
+    a
 }
 
 /// A worker process's arguments: `argv` with each parsed `--arg-from-stdin`
@@ -218,11 +257,11 @@ fn check_jobs_args(j: &JobsArgs) -> error::Result<Transport> {
 /// `--max-memory-size 0` is one process with no ceiling.
 /// See docs/reference/commands.md.
 pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
-    let (j, rest) = parse_jobs_args(argv);
+    let (mut j, rest) = parse_jobs_args(argv);
     if j.worker {
         ignored::hush();
     }
-    let mut a = parse_eval_args(&rest);
+    let mut a = jobs_eval_args(argv, &rest, &mut j);
     a.no_tracing_cache = true;
     a.flake_whole = true;
     // nix-eval-jobs takes the argument as a file unless --flake says otherwise.

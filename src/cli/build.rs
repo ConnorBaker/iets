@@ -129,7 +129,7 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
         }
         s => rest.push(s.to_string()),
     });
-    let (a, overrides) = parse_eval_args_with_overrides(&rest);
+    let (a, overrides) = parse_eval_args_with_overrides(&rest, |_| {});
     b.root_key = root_key(&installables(&a));
     b.config = config::Config::load(&overrides).unwrap_or_else(|e| session::exit(e.report()));
     b.overrides = overrides;

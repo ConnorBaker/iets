@@ -133,17 +133,29 @@ pub fn cache_flag(a: &mut EvalArgs, s: &str, mut next: impl FnMut() -> String) -
 }
 
 pub fn parse_eval_args(argv: &[String]) -> EvalArgs {
-    let (a, overrides) = parse_eval_args_with_overrides(argv);
+    parse_eval_args_with_bindings(argv, |_| {})
+}
+
+fn parse_eval_args_with_bindings(argv: &[String], binding: impl FnMut(usize)) -> EvalArgs {
+    let (a, overrides) = parse_eval_args_with_overrides(argv, binding);
     config::Config::load_native(&overrides).unwrap_or_else(|e| session::exit(e.report()));
     a
 }
 
-fn parse_eval_args_with_overrides(argv: &[String]) -> (EvalArgs, Vec<(String, String)>) {
+fn parse_eval_args_with_overrides(
+    argv: &[String],
+    mut binding: impl FnMut(usize),
+) -> (EvalArgs, Vec<(String, String)>) {
     let mut a = EvalArgs::new();
     let mut f = EvalFlags::default();
-    each_arg(argv, |s, next| {
+    help::each_arg_at(argv, |index, s, next| {
+        let before = f.args.len();
         match s {
-            _ if eval_flag(&mut f, s, || Ok(next())).unwrap_or_else(|e| arg_error(e)) => {}
+            _ if eval_flag(&mut f, s, || Ok(next())).unwrap_or_else(|e| arg_error(e)) => {
+                if f.args.len() != before {
+                    binding(index);
+                }
+            }
             "--strict" => a.strict = true,
             "--json" => a.json = true,
             "--raw" => a.raw = true,

@@ -530,6 +530,45 @@ fn job_paths_require_utf8(bin: Iets, #[case] memory: &str) {
 }
 
 #[rstest]
+#[case::walk("0")]
+#[case::collector("4096")]
+fn only_the_last_auto_argument_supplies_a_value(bin: Iets, #[case] memory: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let expr = r#"{ label, system }: { job = derivation { system = "test-" + system; name = label; builder = ":"; }; }"#;
+    let job = || {
+        let mut c = ci(&bin);
+        c.current_dir(dir.path())
+            .args(["--max-memory-size", memory, "--expr", expr]);
+        c
+    };
+    fs::write(dir.path().join("input"), "from-stdin").unwrap();
+    let out = ok(job()
+        .args(["--argstr", "other", "--argstr"])
+        .args(["--arg-from-file", "label", "missing"])
+        .args(["--arg", "label", r#""final""#])
+        .args(["--arg-from-stdin", "system", "--arg-from-stdin", "system"])
+        .stdin(File::open(dir.path().join("input")).unwrap()));
+    let row: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(row["name"], "final");
+    assert_eq!(row["system"], "test-from-stdin");
+
+    let distinct = ok(job()
+        .args(["--arg-from-stdin", "system", "--arg-from-stdin", "label"])
+        .stdin(File::open(dir.path().join("input")).unwrap()));
+    let row: Value = serde_json::from_slice(&distinct.stdout).unwrap();
+    assert_eq!(row["name"], "from-stdin");
+    assert_eq!(row["system"], "test-");
+
+    let missing = job()
+        .args(["--argstr", "label", "initial"])
+        .args(["--arg-from-file", "label", "missing"])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(stderr(&missing).contains("cannot read 'missing'"));
+}
+
+#[rstest]
 fn worker_keeps_flag_shaped_include_operand(bin: Iets) {
     let system = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs/system.txt");
     let output = ok(ci(&bin).stdin(File::open(system).unwrap()).args([

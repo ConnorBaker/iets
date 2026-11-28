@@ -475,10 +475,17 @@ pub fn value<'a>(argv: &'a [String], i: usize, flag: &str) -> &'a String {
 
 /// Calls `f` with each argument; `next` takes the one after it as its value.
 pub fn each_arg(argv: &[String], mut f: impl FnMut(&str, &mut dyn FnMut() -> String)) {
+    each_arg_at(argv, |_, s, next| f(s, next));
+}
+
+pub(super) fn each_arg_at(
+    argv: &[String],
+    mut f: impl FnMut(usize, &str, &mut dyn FnMut() -> String),
+) {
     let mut i = 0;
     while i < argv.len() {
         let s = argv[i].as_str();
-        f(s, &mut || {
+        f(i, s, &mut || {
             i += 1;
             value(argv, i, s).clone()
         });
