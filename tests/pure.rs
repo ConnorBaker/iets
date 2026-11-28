@@ -6,9 +6,11 @@ mod hermetic;
 use hermetic::{Iets, bin, stderr, stdout};
 use rstest::rstest;
 
+#[cfg(unix)]
+use std::ffi::OsStr;
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs::symlink;
+use std::os::unix::{ffi::OsStrExt, fs::symlink};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use tempfile::{TempDir, tempdir};
@@ -206,6 +208,37 @@ fn get_flake_takes_a_path_its_nar_hash_locks(bin: Iets) {
         e.contains("input attribute 'narHash' is not a string"),
         "{e}"
     );
+}
+
+/// A UTF-8 fetch path can traverse a symlink with arbitrary target bytes.
+#[cfg(unix)]
+#[rstest]
+#[case::project("toString ./.")]
+#[case::store_copy("builtins.path { path = ./.; }")]
+fn a_path_input_preserves_the_bytes_of_a_link_target(bin: Iets, #[case] root: &str) {
+    let d = tempdir().unwrap();
+    let dir = resolved(d.path());
+    let name = OsStr::from_bytes(b"target-\xff");
+    let target = dir.join(name).join("tree");
+    if let Err(e) = fs::create_dir_all(&target) {
+        // Some filesystems require UTF-8 names.
+        assert_eq!(e.raw_os_error(), Some(libc::EILSEQ), "{e}");
+        return;
+    }
+    let sibling = dir.join("target-\u{fffd}/tree");
+    fs::create_dir_all(&sibling).unwrap();
+    fs::write(target.join("value"), "target").unwrap();
+    fs::write(sibling.join("value"), "sibling").unwrap();
+    symlink(name, dir.join("alias")).unwrap();
+
+    let hash = iets::store::nar::nar_hash(&target).unwrap().to_sri();
+    let expr = format!(
+        r#"let t = builtins.fetchTree {{ type = "path"; path = ({root}) + "/alias/tree"; narHash = "{hash}"; }};
+           in builtins.readFile (t.outPath + "/value")"#
+    );
+    let o = run(&bin, &dir, &["eval", "--raw", "--expr", &expr]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "target");
 }
 
 const ZERO: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
