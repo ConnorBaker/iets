@@ -13,7 +13,7 @@ use crate::api::{self, EvalArgs, Input, cwd, flake, installable, report};
 use crate::builtins::strings::parse_drv_name_bytes;
 use crate::builtins::text::regex::{self, Prog};
 use crate::cli::classic::nix::{global_flag, nix_settings};
-use crate::cli::classic::{Argv, Common, eval_config_with, fallback, lookup_file_arg};
+use crate::cli::classic::{Argv, Common, check_file, eval_config_with, fallback, lookup_file_arg};
 use crate::cli::{self, help, render};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos};
 use crate::parallel::force::{T_ATTRS_WHNF, fanout};
@@ -132,6 +132,9 @@ fn parse(argv: &[String], native: bool) -> Result<Search, String> {
             }
         }
         a.i += 1;
+    }
+    if !native {
+        check_file(s.file.as_deref())?;
     }
     // The first argument is the installable; natively only when it names one,
     // so that `iets search hello` searches nixpkgs.

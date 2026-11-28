@@ -387,6 +387,7 @@ local, and any other flag.
 
 #### What `nix` falls back on
 
+- `--file -` to read the expression from stdin;
 - `nix eval --apply`, `--write-to`, or more than one installable;
 - `nix build --rebuild`, `--dry-run` or `--json`;
 - `nix derivation show --stdin`;

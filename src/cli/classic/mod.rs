@@ -238,6 +238,14 @@ pub fn eval_config_with(c: &Common, cfg: &Config, cache: &EvalArgs) -> EvalConfi
         .lint_root(&entry)
 }
 
+/// Nix reads `--file -` from stdin. Delegate before looking up a cached result.
+pub(super) fn check_file(file: Option<&str>) -> Result<(), String> {
+    if file == Some("-") {
+        return Err("reading the expression from stdin is not implemented".into());
+    }
+    Ok(())
+}
+
 /// `lookupFileArg`: `<name>` goes through the search path, anything else is a
 /// path relative to the working directory.
 pub fn lookup_file_arg(ev: &mut Evaluator, f: &str, cwd: &[u8]) -> EvalResult<Vec<u8>> {

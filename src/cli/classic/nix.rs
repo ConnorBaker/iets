@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use super::{
-    Argv, Common, common_flag, develop, drvshow, eval_config, fallback, fmt, local,
+    Argv, Common, check_file, common_flag, develop, drvshow, eval_config, fallback, fmt, local,
     lookup_file_arg, settings, shell_settings, store_given,
 };
 use crate::api::build::{self, Dispatch, Root};
@@ -207,7 +207,7 @@ impl Nix {
         if self.expr.is_some() && self.file.is_some() {
             return Err("'--file' and '--expr' are exclusive".into());
         }
-        Ok(())
+        check_file(self.file.as_deref())
     }
 
     /// installable-flake.cc: a flake installable refuses `--arg`/`--argstr`, so
