@@ -1,7 +1,7 @@
 //! Binary format of the cache entry files: a tag byte per record, LEB128
 //! lengths, raw bytes. One format version byte leads every file.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::str;
 use std::sync::Arc;
@@ -64,10 +64,10 @@ impl Enc {
         self.0.extend_from_slice(d);
     }
 
-    fn list(&mut self, items: &[Vec<u8>]) {
+    fn list(&mut self, items: &[impl AsRef<[u8]>]) {
         self.u64(items.len() as u64);
         for i in items {
-            self.bytes(i);
+            self.bytes(i.as_ref());
         }
     }
 }
@@ -520,12 +520,9 @@ fn accepted_set(e: &mut Enc, accepted: &Accepted) {
         None => e.u8(0),
         Some(a) => {
             e.u8(1);
-            let mut v: Vec<Vec<u8>> = a
-                .iter()
-                .map(|p| p.as_os_str().as_encoded_bytes().to_vec())
-                .collect();
-            v.sort();
-            e.list(&v);
+            let mut paths: Vec<_> = a.iter().map(|p| p.as_os_str().as_encoded_bytes()).collect();
+            paths.sort_unstable();
+            e.list(&paths);
         }
     }
 }
@@ -533,9 +530,14 @@ fn accepted_set(e: &mut Enc, accepted: &Accepted) {
 fn read_accepted(d: &mut Dec<'_>) -> Option<Accepted> {
     match d.u8().ok()? {
         0 => Some(None),
-        1 => Some(Some(Arc::new(
-            d.list().ok()?.iter().map(|p| path_buf(p)).collect(),
-        ))),
+        1 => {
+            let n = d.count().ok()?;
+            let mut paths = HashSet::with_capacity(n.min(1 << 16));
+            for _ in 0..n {
+                paths.insert(path_buf(d.bytes().ok()?));
+            }
+            Some(Some(Arc::new(paths)))
+        }
         _ => None,
     }
 }
