@@ -209,7 +209,7 @@ impl Proc {
             .arg("eval-jobs")
             .arg("--worker")
             .env("IETS_SESSION_ID", log::session_id())
-            .args(args)
+            .args(args.iter().map(|a| crate::argv::os(a)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

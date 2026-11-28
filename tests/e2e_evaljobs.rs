@@ -530,6 +530,42 @@ fn job_paths_require_utf8(bin: Iets, #[case] memory: &str) {
 }
 
 #[rstest]
+#[case::walk("0")]
+#[case::collector("1024")]
+fn job_argument_bytes(bin: Iets, #[case] memory: &str) {
+    use sha2::{Digest, Sha256};
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let expr = r#"{ x }: { job = derivation { name = builtins.hashString "sha256" x; system = "x"; builder = ":"; }; }"#;
+    let run = |cmd: &mut Command, value: &[u8]| {
+        let out = ok(cmd.args(["--max-memory-size", memory, "--expr", expr]));
+        let row: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(row["name"], format!("{:x}", Sha256::digest(value)));
+    };
+    let mixed = b"a\xf4\x8f\xbe\x80\xff\xf4\x8f\xbf\xbfb";
+    for value in [b"".as_slice(), b"ordinary", mixed] {
+        run(
+            ci(&bin)
+                .args(["--argstr", "x"])
+                .arg(OsStr::from_bytes(value)),
+            value,
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(OsStr::from_bytes(b"input-\xff"));
+    fs::write(&path, mixed).unwrap();
+    run(ci(&bin).args(["--arg-from-file", "x"]).arg(&path), mixed);
+    run(
+        ci(&bin)
+            .args(["--arg-from-stdin", "x"])
+            .stdin(File::open(path).unwrap()),
+        mixed,
+    );
+}
+
+#[rstest]
 fn worker_keeps_flag_shaped_include_operand(bin: Iets) {
     let system = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs/system.txt");
     let output = ok(ci(&bin).stdin(File::open(system).unwrap()).args([

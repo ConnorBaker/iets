@@ -12,7 +12,11 @@ use std::ffi::OsString;
 const BASE: u32 = 0x10FF00;
 
 pub fn encode(arg: OsString) -> String {
-    let raw = arg.into_vec();
+    encode_bytes(&arg.into_vec())
+}
+
+/// Bytes used in a synthesized argument, such as the contents of stdin.
+pub(crate) fn encode_bytes(raw: &[u8]) -> String {
     let mut s = String::with_capacity(raw.len());
     for chunk in raw.utf8_chunks() {
         for c in chunk.valid().chars() {

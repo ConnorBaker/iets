@@ -17,9 +17,9 @@ use crate::jobs::{self, Line, Opts};
 use crate::remote::worker::{Connection, Transport};
 use crate::runtime::Word;
 use crate::session::{self, Session};
-use crate::{ignored, log};
+use crate::{argv, ignored, log};
 use std::fs;
-use std::io::{self, BufWriter};
+use std::io::{self, BufWriter, Read};
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
@@ -137,16 +137,19 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
             "--arg-from-file" => {
                 let name = arg(&mut i);
                 let path = arg(&mut i);
-                let contents = fs::read_to_string(&path).unwrap_or_else(|e| {
+                let contents = fs::read(argv::os(&path)).unwrap_or_else(|e| {
                     exit(CrateError::io(format!("cannot read '{path}'"), e).report())
                 });
-                rest.extend(["--argstr".to_string(), name, contents]);
+                rest.extend(["--argstr".to_string(), name, argv::encode_bytes(&contents)]);
             }
             "--arg-from-stdin" => {
                 let flag = i;
                 let name = arg(&mut i);
-                let contents = io::read_to_string(io::stdin())
+                let mut contents = Vec::new();
+                io::stdin()
+                    .read_to_end(&mut contents)
                     .unwrap_or_else(|e| exit(CrateError::io("cannot read stdin", e).report()));
+                let contents = argv::encode_bytes(&contents);
                 rest.extend(["--argstr".to_string(), name, contents.clone()]);
                 j.stdin_args.push((flag, contents));
             }
