@@ -14,7 +14,8 @@
 //! that wait for one.
 
 use std::collections::BTreeSet;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
@@ -34,6 +35,9 @@ use crate::print::{lexicographic_entries, lexicographic_order};
 use crate::runtime::Word;
 use crate::session::{self, Session};
 use crate::sys::process;
+
+/// Private startup service when the OS cannot represent the worker arguments.
+pub const ARGS_FROM_PIPE: &str = "--worker-args-from-pipe";
 
 pub const MSG_NEXT: &str = "next";
 pub const MSG_RESTART: &str = "restart";
@@ -199,13 +203,8 @@ struct Proc {
 }
 
 impl Proc {
-    fn spawn(args: &[String]) -> Result<Proc> {
-        Session::current()
-            .jobs
-            .spawned
-            .fetch_add(1, Ordering::Relaxed);
-        let exe = env::current_exe().map_err(|e| Error::io("current_exe", e))?;
-        let child = Command::new(exe)
+    fn start(exe: &Path, args: &[String]) -> io::Result<Child> {
+        Command::new(exe)
             .arg("eval-jobs")
             .arg("--worker")
             .env("IETS_SESSION_ID", log::session_id())
@@ -214,9 +213,31 @@ impl Proc {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| Error::io("spawning worker process", e))?;
+    }
+
+    fn spawn(args: &[String]) -> Result<Proc> {
+        Session::current()
+            .jobs
+            .spawned
+            .fetch_add(1, Ordering::Relaxed);
+        let exe = env::current_exe().map_err(|e| Error::io("current_exe", e))?;
+        let (child, framed) = match Self::start(&exe, args) {
+            Ok(child) => (child, false),
+            Err(e)
+                if e.kind() == io::ErrorKind::ArgumentListTooLong
+                    // CreateProcessW reports ERROR_FILENAME_EXCED_RANGE for an overlong command.
+                    || (cfg!(windows) && e.raw_os_error() == Some(206))
+                    || (e.kind() == io::ErrorKind::InvalidInput
+                        && args.iter().any(|a| a.as_bytes().contains(&0))) =>
+            {
+                let child = Self::start(&exe, &[ARGS_FROM_PIPE.to_string()])
+                    .map_err(|e| Error::io("spawning worker process", e))?;
+                (child, true)
+            }
+            Err(e) => return Err(Error::io("spawning worker process", e)),
+        };
         let mut child = Reap(child);
-        let to = child
+        let mut to = child
             .0
             .stdin
             .take()
@@ -226,6 +247,14 @@ impl Proc {
             .stdout
             .take()
             .ok_or_else(|| Error::Protocol("worker process has no stdout pipe".into()))?;
+        if framed {
+            let mut pipe = BufWriter::new(&mut to);
+            serde_json::to_writer(&mut pipe, args)
+                .map_err(io::Error::other)
+                .and_then(|_| pipe.write_all(b"\n"))
+                .and_then(|_| pipe.flush())
+                .map_err(|e| Error::io("sending worker arguments", e))?;
+        }
         let from = BufReader::with_capacity(1 << 20, out);
         Ok(Proc { child, to, from })
     }

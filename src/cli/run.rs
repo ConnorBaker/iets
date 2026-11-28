@@ -1,6 +1,7 @@
 //! `iets` as a function, for `main` and for in-process tests.
 
 use std::ffi::{OsStr, OsString};
+use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -9,6 +10,8 @@ use std::thread::Builder;
 use crate::api::MAIN_STACK;
 use crate::cli::{self, help};
 use crate::env::Env;
+use crate::error::Error;
+use crate::jobs::collector::ARGS_FROM_PIPE;
 use crate::session::{self, Exit, Session, exit};
 use crate::{log, profile, settings};
 
@@ -37,7 +40,21 @@ fn on_big_stack(f: impl FnOnce() -> i32 + Send + 'static) -> i32 {
     }
 }
 
-pub fn dispatch(session: &Session, argv: Vec<String>, classic: Option<String>) -> i32 {
+pub fn dispatch(session: &Session, mut argv: Vec<String>, classic: Option<String>) -> i32 {
+    // Decode the collector's startup frame before interpreter-wide options.
+    // The rest of stdin remains the worker's ordinary request stream.
+    if argv == ["eval-jobs", "--worker", ARGS_FROM_PIPE] {
+        let mut frame = String::new();
+        if let Err(e) = io::stdin().read_line(&mut frame) {
+            return Error::io("reading worker arguments", e).report();
+        }
+        let args: Vec<String> = match serde_json::from_str(&frame) {
+            Ok(args) => args,
+            Err(e) => return Error::Protocol(format!("invalid worker arguments: {e}")).report(),
+        };
+        argv.pop();
+        argv.extend(args);
+    }
     // a classic fallback execs the real nix with what is left
     let (argv, options) = match settings::take_options(&argv) {
         Ok(a) => a,

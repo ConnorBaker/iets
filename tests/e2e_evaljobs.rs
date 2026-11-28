@@ -728,3 +728,46 @@ fn worker_requests_only_admitted_children_at_the_chunk_depth(bin: Iets) {
         assert_eq!(response["attrs"], serde_json::json!(names));
     }
 }
+
+#[rstest]
+fn workers_receive_stdin_values_that_argv_cannot_carry(bin: Iets) {
+    let dir = tempfile::tempdir().unwrap();
+    let tmp = dir.path().join("tmp");
+    fs::create_dir(&tmp).unwrap();
+    let input = dir.path().join("stdin");
+    let expr = r#"{ x }: let
+      d = derivation { name = builtins.hashString "sha256" x;
+        system = "tmp-" + toString (builtins.length (builtins.attrNames
+          (builtins.readDir (builtins.getEnv "TMPDIR")))); builder = ":"; };
+    in { a = d; b = d; }"#;
+    for bytes in [b"a\0z".to_vec(), vec![b'a'; 163840]] {
+        fs::write(&input, bytes).unwrap();
+        let run = |memory: &str| {
+            ok(bin
+                .cmd()
+                .env("TMPDIR", &tmp)
+                .args([
+                    "eval-jobs",
+                    "--workers",
+                    "1",
+                    "--impure",
+                    "--no-instantiate",
+                    "--max-memory-size",
+                    memory,
+                    "--arg-from-stdin",
+                    "x",
+                    "--expr",
+                    expr,
+                ])
+                .stdin(File::open(&input).unwrap()))
+        };
+        let native = run("0");
+        let recycled = run("1");
+        assert_eq!(norm(&recycled), norm(&native));
+        assert_eq!(norm(&native).len(), 2);
+        assert!(String::from_utf8_lossy(&native.stdout).contains(r#""system":"tmp-0""#));
+        // The memory limit retires workers where /proc reports peak RSS.
+        #[cfg(target_os = "linux")]
+        assert!(stderr(&recycled).contains("3 worker processes spawned"));
+    }
+}
