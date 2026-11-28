@@ -60,6 +60,7 @@ pub fn cmd_cache_dump(file: &str) -> i32 {
             Obs::Input { entry, version } => {
                 render::line(&format!("input {} v{version}", s(entry)))
             }
+            Obs::InputObject { id, .. } => render::line(&format!("input object {}", hex(id))),
         }
     }
     0

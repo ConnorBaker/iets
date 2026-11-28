@@ -86,20 +86,32 @@ impl Cache {
     /// The entry is opened once per [`Cache`], as one run looks its key up
     /// once: everything this run replays comes from that one generation.
     pub fn lookup(&self) -> bool {
+        self.validated(&Session::current(), false, || Some(()))
+            .is_some()
+    }
+
+    pub(crate) fn validated<T>(
+        &self,
+        owner: &Arc<Session>,
+        retained_only: bool,
+        load: impl FnOnce() -> Option<T>,
+    ) -> Option<T> {
+        let _entered = owner.enter();
+        let packs = crate::treestore::PackValidation::for_lookup(retained_only);
         let t0 = Instant::now();
         let bad = || {
             self.store.discard(&self.key, self.opened());
             if self.timings {
                 errln!("cache: miss (unreadable entry, discarded)");
             }
-            false
+            None
         };
         let entry = match self.opened() {
             Opened::None => {
                 if self.timings {
                     errln!("cache: miss (no entry)");
                 }
-                return false;
+                return None;
             }
             Opened::Bad => return bad(),
             Opened::Entry(e) => e,
@@ -112,8 +124,20 @@ impl Cache {
         };
         let threads = thread::available_parallelism().map_or(1, |n| n.get().min(4));
         let t_load = t0.elapsed();
-        match validate::validate(&mut obs, threads) {
+        match validate::validate_with_packs(&mut obs, threads, &packs) {
             Ok(r) => {
+                let Some(accepted) = load() else {
+                    if self.timings {
+                        errln!("cache: miss (result unavailable)");
+                    }
+                    return None;
+                };
+                if !packs.accept() {
+                    if self.timings {
+                        errln!("cache: miss (input pack listing changed during validation)");
+                    }
+                    return None;
+                }
                 if r.refreshed > 0 {
                     self.republish(entry, &wire::encode_readset(&obs));
                 } else {
@@ -128,7 +152,7 @@ impl Cache {
                         (t0.elapsed() - t_load).as_secs_f64()
                     );
                 }
-                true
+                Some(accepted)
             }
             Err(m) => {
                 log::invalidated(m.0.clone());
@@ -140,7 +164,7 @@ impl Cache {
                         t0.elapsed().as_secs_f64()
                     );
                 }
-                false
+                None
             }
         }
     }

@@ -92,6 +92,15 @@ impl Run {
     /// The cache entry `f` accepts, when this run has one and it validated.
     /// `f` returning `None` is a miss, so the run goes on.
     pub fn hit<T>(&self, f: impl FnOnce(&Cache) -> Option<T>) -> Option<T> {
+        let c = self.replayable()?;
+        // Arbitrary decision code may run native Nix and then reject. Only
+        // use pack evidence the session had already acquired independently.
+        c.validated(self.cfg.configured_session(), true, || Some(()))?;
+        c.replay_nix_config();
+        f(c)
+    }
+
+    fn replayable(&self) -> Option<&Cache> {
         let c = self.cache.as_ref()?;
         // A hit must respect the same configured reservation limit as a fresh run.
         // On rejection, go through the runtime's usual error path.
@@ -104,17 +113,18 @@ impl Run {
             }
             parallel::fiber::check_reservation(self.workers, size).ok()?;
         }
-        if !c.lookup() {
-            return None;
-        }
-        c.replay_nix_config();
-        f(c)
+        Some(c)
     }
 
     /// The result bytes of the entry this run validated: what the command
     /// wrote with `Cache::write` last time, when the read set still holds.
     pub fn hit_result(&self) -> Option<Vec<u8>> {
-        self.hit(|c| c.part(Part::Result))
+        let c = self.replayable()?;
+        let result = c.validated(self.cfg.configured_session(), false, || {
+            c.part(Part::Result)
+        })?;
+        c.replay_nix_config();
+        Some(result)
     }
 
     /// A `build` entry this run validated: the roots `Cache::write_build`

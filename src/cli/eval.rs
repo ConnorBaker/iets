@@ -5,16 +5,12 @@ use std::time::Instant;
 
 use crate::cli::{self, EvalArgs, render, report, run_for};
 use crate::eval::{Evaluator, Pos};
-use crate::trace::store::Part;
 use crate::{print, treestore};
 
 pub fn run_eval(a: EvalArgs) -> i32 {
     let mut run = run_for(&a).cached(&a, "eval");
-    if let Some(out) = run.hit(|c| {
-        let out = c.part(Part::Result)?;
-        c.replay_warnings();
-        Some(out)
-    }) {
+    if let Some(out) = run.hit_result() {
+        run.cache.as_ref().expect("a cache hit").replay_warnings();
         render::bytes(&out);
         return 0;
     }

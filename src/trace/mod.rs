@@ -146,14 +146,19 @@ pub enum Obs {
         query: Query,
         hash: Digest32,
     },
-    /// One entry of the input store read during the evaluation
-    /// (`crate::treestore`), whatever was read out of it. The entry's name is the
-    /// NAR hash of its tree, so nothing about the bytes can change under a
-    /// name that is still there: the check is that the store still holds the
-    /// entry and that its index is a version this binary reads.
+    /// The input index used by the evaluation. Regular file contents are
+    /// stored separately and have their own observation when demanded.
     Input {
         entry: Vec<u8>,
         version: u8,
+    },
+    /// The bytes actually read from an input pack. Index-only operations
+    /// such as listing a directory need only the Input observation.
+    InputObject {
+        id: Digest32,
+        /// BLAKE3 of the decoded length and the actual LZ4 payload. Raw
+        /// objects are validated directly against their content ID.
+        encoded: Option<Digest32>,
     },
 }
 
@@ -172,6 +177,7 @@ impl Obs {
             Obs::Env { name, .. } => (5, Cow::Borrowed(name), 0),
             Obs::Cmd { dir, query, .. } => (6, Cow::Borrowed(dir), query.to_u8()),
             Obs::Input { entry, .. } => (7, Cow::Borrowed(entry), 0),
+            Obs::InputObject { id, .. } => (10, Cow::Borrowed(id), 0),
         }
     }
 }

@@ -256,6 +256,13 @@ fn put_obs(e: &mut Enc, o: &Obs) {
             e.bytes(entry);
             e.u8(*version);
         }
+        Obs::InputObject { id, encoded } => {
+            e.u8(if encoded.is_some() { 12 } else { 10 });
+            e.digest(id);
+            if let Some(encoded) = encoded {
+                e.digest(encoded);
+            }
+        }
     }
 }
 
@@ -332,6 +339,10 @@ fn get_obs(d: &mut Dec<'_>) -> R<Obs> {
         7 => Obs::Input {
             entry: d.vec()?,
             version: d.u8()?,
+        },
+        tag @ (10 | 12) => Obs::InputObject {
+            id: d.digest()?,
+            encoded: (tag == 12).then(|| d.digest()).transpose()?,
         },
         _ => return Err(()),
     })
@@ -793,7 +804,7 @@ mod tests {
     }
 
     fn obs(tc: &TestCase) -> Obs {
-        match tc.draw(gs::integers::<u8>().max_value(7)) {
+        match tc.draw(gs::integers::<u8>().max_value(8)) {
             0 => Obs::File {
                 path: bytes(tc),
                 size: int(tc) as u64,
@@ -835,9 +846,13 @@ mod tests {
                 query: tc.draw(gs::sampled_from(&Query::ALL[..])),
                 hash: digest(tc),
             },
-            _ => Obs::Input {
+            7 => Obs::Input {
                 entry: bytes(tc),
                 version: tc.draw(gs::integers()),
+            },
+            _ => Obs::InputObject {
+                id: digest(tc),
+                encoded: opt(tc, digest),
             },
         }
     }

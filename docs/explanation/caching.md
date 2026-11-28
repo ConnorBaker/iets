@@ -399,11 +399,20 @@ file system, from an input-store entry's objects, or from memory.
 `/nix/store` is checked first and wins when it has the tree, which changes
 nothing, since the two hold the same bytes by construction.
 
-This also gives the read set a cheap shape. An input-store entry is one observation for the whole tree, because the entry's name is the NAR hash of
-its tree. Validating a whole nixpkgs is one stat call and a version-byte
-comparison, against the 3,513 file observations the same tree would cost
-otherwise. A validated observation also marks the entry as used, at most
-once a day, so the sweep doesn't take an input that is in use.
+A lookup in an input records its index. Reading a regular file also records
+its object ID. Validation streams each distinct demanded payload from the
+current packs. For raw files it checks the content hash. For LZ4 it checks
+the compressed bytes and decoded length observed during the original read,
+so a hit can skip decompression. Listing a directory or asking
+whether a file exists can use the index even when a file's pack is missing.
+A native read can keep an open pack usable in the same session after a
+sweep unlinks it. `iets eval` and `Run::hit_result` retain the validated
+pack listing before reporting a hit. If another session has taken the
+remaining descriptor slots in the meantime, the evaluator runs normally.
+`Run::hit` accepts an application callback that may perform more work and
+then decline the candidate. For an entry that read packed file bytes,
+this callback is eligible when the session already holds the needed packs.
+A validated index is marked as used at most once a day for the TTL sweep.
 
 Before a process downloads, it takes a lock on that tree's name. A second
 process that needs the same tree prints one line, blocks, and then reads the

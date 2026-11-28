@@ -596,7 +596,7 @@ impl SrcPath {
                 ev.trace().file(&p, &meta, &bytes);
                 Ok(bytes)
             }
-            At::Spool(tree, name) => match tree.read(&self.rel) {
+            At::Spool(tree, name) => match tree.read_traced(&self.rel, ev.trace()) {
                 // the type of the member is what the stat would have said
                 Err(e) if e.kind() == io::ErrorKind::NotFound || errno::is_directory(&e) => {
                     Err((STAT, e))
@@ -662,6 +662,15 @@ impl SrcPath {
     /// filter is the caller's to apply ([`SrcPath::accepts`]), because a dump
     /// that records the tree must see what the filter hides.
     pub fn dump(&self, sink: &mut dyn io::Write, filter: &mut PathFilter<'_>) -> io::Result<()> {
+        self.dump_traced(sink, filter, &trace::Trace::default())
+    }
+
+    pub(crate) fn dump_traced(
+        &self,
+        sink: &mut dyn io::Write,
+        filter: &mut PathFilter<'_>,
+        trace: &trace::Trace,
+    ) -> io::Result<()> {
         match &self.src {
             Src::Fs { root, .. } => dump_path(&below(root, &self.rel), sink, filter),
             Src::Spool { name, .. } => treestore::get(name)
@@ -670,7 +679,7 @@ impl SrcPath {
                         "the input store no longer holds '{name}'; evaluate again to fetch it"
                     ))
                 })?
-                .dump(&self.rel, &self.in_spool(), sink, filter),
+                .dump_traced(&self.rel, &self.in_spool(), sink, filter, trace),
             Src::Mem(b) => dump_string(b, sink),
         }
     }
@@ -730,7 +739,8 @@ pub fn copy_path_to_store(
         Some(At::Spool(tree, base)) => {
             treestore::record(ev, &tree, base);
             let mut h = Hasher::new(HashAlgo::Sha256);
-            at.nar(&mut h).map_err(copy_err)?;
+            at.dump_traced(&mut h, &mut |p, _| at.accepts(p), ev.trace())
+                .map_err(copy_err)?;
             let size = h.bytes_written();
             let hash = h.finish();
             (fixed(&hash)?, at.clone(), hash, size)

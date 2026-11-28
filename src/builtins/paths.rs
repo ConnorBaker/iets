@@ -692,6 +692,7 @@ fn add_path_inner(
             let mut err: Option<Box<Error>> = None;
             let git_lint = on_disk && ev.lint_on(LintId::GitInSource);
             let mut saw_git = false;
+            let trace = ev.trace().clone();
             let mut f = |p: &Path, t: FileType| -> bool {
                 let keep = if !at.accepts(p) {
                     false
@@ -724,7 +725,7 @@ fn add_path_inner(
                 keep
             };
             let mut h = Hasher::new(HashAlgo::Sha256);
-            let r = at.dump(&mut h, &mut f);
+            let r = at.dump_traced(&mut h, &mut f, &trace);
             if let Some(e) = err {
                 return Err(e);
             }

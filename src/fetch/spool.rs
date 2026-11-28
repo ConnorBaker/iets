@@ -37,7 +37,8 @@ use std::{result, str};
 use crate::error::{Error, Result};
 use crate::store::hash::{Hash, HashAlgo, Hasher};
 use crate::store::nar::{FileType, NAR_MAX_DEPTH, PathFilter, TreeWriter};
-use crate::treestore::pack::{Id, Packs};
+use crate::trace::{Obs, Trace};
+use crate::treestore::pack::{self, Id, Packs};
 
 use super::unpack;
 
@@ -591,11 +592,27 @@ impl Tree {
         }
     }
 
-    fn object(&self, id: &Id, size: u64) -> io::Result<Vec<u8>> {
+    fn object(&self, id: &Id, size: u64, trace: &Trace) -> io::Result<Vec<u8>> {
         let Source::Packs(packs) = &self.src else {
             unreachable!("an object blob in a spool")
         };
-        let bytes = packs.read(id)?;
+        let bytes = if trace.is_on() {
+            let read = packs.read_observed(id);
+            match &read {
+                Ok((b, encoded))
+                    if b.len() as u64 == size && (encoded.is_some() || pack::id_of(b) == *id) =>
+                {
+                    trace.record(Obs::InputObject {
+                        id: *id,
+                        encoded: *encoded,
+                    });
+                }
+                _ => trace.mark_uncacheable(),
+            }
+            read?.0
+        } else {
+            packs.read(id)?
+        };
         if bytes.len() as u64 != size {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -609,6 +626,10 @@ impl Tree {
     /// own buffer. A spool member is read a chunk at a time; an object is one
     /// payload, so it is read whole.
     pub fn blob(&self, at: &Blob) -> io::Result<Box<dyn Read + '_>> {
+        self.blob_traced(at, &Trace::default())
+    }
+
+    fn blob_traced(&self, at: &Blob, trace: &Trace) -> io::Result<Box<dyn Read + '_>> {
         Ok(match *at {
             Blob::Spool {
                 offset,
@@ -622,7 +643,7 @@ impl Tree {
                     left: size,
                 }),
             },
-            Blob::Object { id, size } => Box::new(io::Cursor::new(self.object(&id, size)?)),
+            Blob::Object { id, size } => Box::new(io::Cursor::new(self.object(&id, size, trace)?)),
         })
     }
 
@@ -678,13 +699,17 @@ impl Tree {
     /// `open`, no copy through a staging buffer, so a read of a member costs
     /// less than a read of the same file under `/nix/store`.
     pub fn read(&self, at: &Blob) -> io::Result<Vec<u8>> {
+        self.read_traced(at, &Trace::default())
+    }
+
+    pub(crate) fn read_traced(&self, at: &Blob, trace: &Trace) -> io::Result<Vec<u8>> {
         let (offset, size, sparse) = match *at {
             Blob::Spool {
                 offset,
                 size,
                 sparse,
             } => (offset, size, sparse),
-            Blob::Object { id, size } => return self.object(&id, size),
+            Blob::Object { id, size } => return self.object(&id, size, trace),
         };
         if let Some(b) = self.mapped(offset, size, sparse) {
             return Ok(b.to_vec());
@@ -698,7 +723,7 @@ impl Tree {
     /// The NAR of the whole tree. No filter runs, so the walk builds no
     /// `shown` paths.
     pub fn dump(&self, sink: &mut dyn Write) -> io::Result<()> {
-        self.write(&self.root, None, sink, &mut |_, _| true)
+        self.dump_traced(&self.root, None, sink, &mut |_, _| true, &Trace::default())
     }
 
     /// The NAR of `node`, with `filter` asked about every entry below it under
@@ -710,19 +735,20 @@ impl Tree {
         sink: &mut dyn Write,
         filter: &mut PathFilter<'_>,
     ) -> io::Result<()> {
-        self.write(node, Some(shown), sink, filter)
+        self.dump_traced(node, Some(shown), sink, filter, &Trace::default())
     }
 
-    fn write(
+    pub(crate) fn dump_traced(
         &self,
         node: &Node,
         shown: Option<&Path>,
         sink: &mut dyn Write,
         filter: &mut PathFilter<'_>,
+        trace: &Trace,
     ) -> io::Result<()> {
         let mut w = TreeWriter::new(sink);
         w.header()?;
-        self.node(node, shown, &mut w, filter, 0)?;
+        self.node(node, shown, &mut w, filter, trace, 0)?;
         w.flush()
     }
 
@@ -734,6 +760,7 @@ impl Tree {
         shown: Option<&Path>,
         w: &mut TreeWriter<'_>,
         filter: &mut PathFilter<'_>,
+        trace: &Trace,
         depth: usize,
     ) -> io::Result<()> {
         if depth >= NAR_MAX_DEPTH {
@@ -742,7 +769,9 @@ impl Tree {
             )));
         }
         match n {
-            Node::File { at, exec } => w.regular(*exec, at.size(), &mut self.blob(at)?),
+            Node::File { at, exec } => {
+                w.regular(*exec, at.size(), &mut self.blob_traced(at, trace)?)
+            }
             Node::Symlink(target) => w.symlink(target),
             Node::Dir(d) => {
                 w.dir()?;
@@ -758,7 +787,7 @@ impl Tree {
                         }
                     };
                     w.entry(name)?;
-                    self.node(child, below.as_deref(), w, filter, depth + 1)?;
+                    self.node(child, below.as_deref(), w, filter, trace, depth + 1)?;
                     w.end_entry()?;
                 }
                 w.end_dir()

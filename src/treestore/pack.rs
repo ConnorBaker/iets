@@ -76,6 +76,26 @@ pub struct Loc {
     flags: u8,
 }
 
+impl Loc {
+    fn decode(self, stored: Vec<u8>) -> io::Result<Vec<u8>> {
+        if self.flags & LZ4 == 0 {
+            return Ok(stored);
+        }
+        lz4_flex::block::decompress(&stored, self.raw as usize)
+            .ok()
+            .filter(|out| out.len() as u64 == self.raw)
+            .ok_or_else(|| corrupt("a payload does not decompress"))
+    }
+
+    fn hasher(self) -> blake3::Hasher {
+        let mut h = blake3::Hasher::new();
+        if self.flags == LZ4 {
+            h.update(&self.raw.to_le_bytes());
+        }
+        h
+    }
+}
+
 fn corrupt(why: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -96,6 +116,12 @@ impl Pack {
     /// `Ok(None)` when the file is not a whole, well-formed pack: the caller
     /// removes it rather than reading anything it says.
     pub fn open(path: &Path) -> io::Result<Option<Pack>> {
+        Self::open_with(path, |p, f| {
+            let _ = p.retain(f);
+        })
+    }
+
+    fn open_with(path: &Path, retain: impl FnOnce(&Pack, File)) -> io::Result<Option<Pack>> {
         let file = sysfs::no_follow_no_block(File::options().read(true)).open(path)?;
         let md = file.metadata()?;
         if !md.is_file() {
@@ -103,7 +129,7 @@ impl Pack {
         }
         let pack = Pack::parse(&file, path, md.len())?;
         if let Some(p) = &pack {
-            let _ = p.retain(file);
+            retain(p, file);
         }
         Ok(pack)
     }
@@ -273,14 +299,33 @@ impl Pack {
     }
 
     pub fn read(&self, loc: Loc) -> io::Result<Vec<u8>> {
-        let stored = self.stored_bytes(loc)?;
-        if loc.flags & LZ4 == 0 {
-            return Ok(stored);
+        loc.decode(self.stored_bytes(loc)?)
+    }
+
+    fn write_stored(&self, loc: Loc, sink: &mut dyn Write) -> io::Result<()> {
+        self.with_file(|file| Self::stream(file, loc, sink))
+    }
+
+    fn stream(file: &File, loc: Loc, sink: &mut dyn Write) -> io::Result<()> {
+        let mut buf = vec![0u8; loc.stored.min(1 << 20) as usize];
+        let mut done = 0;
+        while done < loc.stored {
+            let n = (loc.stored - done).min(buf.len() as u64) as usize;
+            sysfs::read_exact_at(file, &mut buf[..n], loc.offset + done)
+                .map_err(|_| corrupt("truncated"))?;
+            sink.write_all(&buf[..n])?;
+            done += n as u64;
         }
-        lz4_flex::block::decompress(&stored, loc.raw as usize)
-            .ok()
-            .filter(|out| out.len() as u64 == loc.raw)
-            .ok_or_else(|| corrupt("a payload does not decompress"))
+        Ok(())
+    }
+
+    fn matches_payload(file: &File, loc: Loc, id: &Id, encoded: Option<&Id>) -> io::Result<bool> {
+        if (loc.flags == LZ4) != encoded.is_some() {
+            return Ok(false);
+        }
+        let mut h = loc.hasher();
+        Self::stream(file, loc, &mut h)?;
+        Ok(h.finalize().as_bytes() == encoded.unwrap_or(id))
     }
 
     pub fn ids(&self) -> impl Iterator<Item = (Id, Loc)> + '_ {
@@ -422,13 +467,8 @@ impl PackWriter {
         if !self.ids.insert(id) {
             return Ok(());
         }
-        let mut buf = vec![0u8; loc.stored.min(1 << 20) as usize];
-        let mut done = 0;
-        while done < loc.stored {
-            let n = (loc.stored - done).min(buf.len() as u64) as usize;
-            from.read_at(&mut buf[..n], loc.offset + done)?;
-            self.file.write_all(&buf[..n])?;
-            done += n as u64;
+        if loc.stored != 0 {
+            from.write_stored(loc, &mut self.file)?;
         }
         self.entries.push((
             id,
@@ -524,7 +564,15 @@ impl PackSet {
         Self::list(dir, |_, _| {})
     }
 
-    fn list(dir: &Path, mut on_error: impl FnMut(&Path, io::Error)) -> PackSet {
+    fn list(dir: &Path, on_error: impl FnMut(&Path, io::Error)) -> PackSet {
+        Self::list_with(dir, on_error, Pack::open)
+    }
+
+    fn list_with(
+        dir: &Path,
+        mut on_error: impl FnMut(&Path, io::Error),
+        mut open: impl FnMut(&Path) -> io::Result<Option<Pack>>,
+    ) -> PackSet {
         let mut set = PackSet::default();
         let rd = match fs::read_dir(dir) {
             Ok(rd) => rd,
@@ -545,7 +593,7 @@ impl PackSet {
             };
             let path = entry.path();
             if path.extension().is_some_and(|x| x == "pack")
-                && let Err(e) = set.add_entry(&path, &entry)
+                && let Err(e) = set.add_entry(&path, &entry, &mut open)
                 && e.kind() != io::ErrorKind::NotFound
             {
                 on_error(&path, e);
@@ -554,9 +602,14 @@ impl PackSet {
         set
     }
 
-    fn add_entry(&mut self, path: &Path, entry: &fs::DirEntry) -> io::Result<()> {
+    fn add_entry(
+        &mut self,
+        path: &Path,
+        entry: &fs::DirEntry,
+        open: impl FnOnce(&Path) -> io::Result<Option<Pack>>,
+    ) -> io::Result<()> {
         if entry.file_type()?.is_file() {
-            match Pack::open(path)? {
+            match open(path)? {
                 Some(p) => self.packs.push(Arc::new(p)),
                 None => self
                     .broken
@@ -574,6 +627,88 @@ impl PackSet {
 
     pub fn packs(&self) -> &[Arc<Pack>] {
         &self.packs
+    }
+}
+
+// Probes compete with one another for temporary OS descriptors without
+// taking the durable slots used by normal readers.
+static PROVISIONAL: AtomicUsize = AtomicUsize::new(0);
+struct Provisional;
+
+impl Drop for Provisional {
+    fn drop(&mut self) {
+        PROVISIONAL.fetch_sub(1, Atomic::Relaxed);
+    }
+}
+
+fn reserve(counter: &AtomicUsize, count: usize) -> bool {
+    counter
+        .fetch_update(Atomic::Relaxed, Atomic::Relaxed, |n| {
+            n.checked_add(count).filter(|n| *n <= OPEN_PACKS)
+        })
+        .is_ok()
+}
+
+/// Prospective first listing for a cache hit. Its descriptors are private
+/// until the callback accepts, leaving the durable quota to actual readers.
+pub(super) struct ValidationPacks {
+    dir: PathBuf,
+    set: PackSet,
+    // The prefix of the native listing that had room at the time of open.
+    files: Vec<(File, Provisional)>,
+}
+
+impl ValidationPacks {
+    pub(super) fn open(dir: PathBuf) -> Option<Self> {
+        let free = OPEN_PACKS.saturating_sub(OPEN.load(Atomic::Relaxed));
+        if free == 0 {
+            return None;
+        }
+        let mut files = Vec::new();
+        let mut complete = true;
+        let set = PackSet::list_with(
+            &dir,
+            |_, _| {},
+            |path| {
+                Pack::open_with(path, |_, file| {
+                    if complete && files.len() < free {
+                        complete = reserve(&PROVISIONAL, 1);
+                        if complete {
+                            files.push((file, Provisional));
+                        }
+                    }
+                })
+            },
+        );
+        complete.then_some(Self { dir, set, files })
+    }
+
+    pub(super) fn matches(&self, id: &Id, encoded: Option<&Id>) -> bool {
+        self.set
+            .packs
+            .iter()
+            .zip(&self.files)
+            .find_map(|(p, (file, _))| {
+                p.find(id)
+                    .map(|loc| Pack::matches_payload(file, loc, id, encoded).unwrap_or(false))
+            })
+            .unwrap_or(false)
+    }
+
+    pub(super) fn adopt(self) -> Option<Packs> {
+        // Publish the entire prospective retained prefix or decline the hit.
+        if !reserve(&OPEN, self.files.len()) {
+            return None;
+        }
+        for (p, (f, _)) in self.set.packs.iter().zip(self.files) {
+            p.file
+                .set(f)
+                .expect("private pack has no durable descriptor");
+        }
+        Some(Packs {
+            dir: self.dir,
+            set: RwLock::new(Arc::new(self.set)),
+        })
     }
 }
 
@@ -654,8 +789,33 @@ impl Packs {
     /// An object's bytes. `NotFound` when no pack holds it even after fresh
     /// listings. A miss after an incomplete listing reports its I/O error.
     pub fn read(&self, id: &Id) -> io::Result<Vec<u8>> {
+        self.with_object(id, Pack::read)
+    }
+
+    /// Fingerprint the exact compressed bytes passed to the decoder, including
+    /// its output length. A raw object uses its content ID directly.
+    pub(crate) fn read_observed(&self, id: &Id) -> io::Result<(Vec<u8>, Option<Id>)> {
+        self.with_object(id, |pack, loc| {
+            let stored = pack.stored_bytes(loc)?;
+            let encoded =
+                (loc.flags == LZ4).then(|| *loc.hasher().update(&stored).finalize().as_bytes());
+            Ok((loc.decode(stored)?, encoded))
+        })
+    }
+
+    /// A live session can already hold an unlinked pack. Inspect its actual
+    /// descriptor without opening a new one or replacing the session's listing.
+    pub(crate) fn matches_retained(&self, id: &Id, encoded: Option<&Id>) -> bool {
+        self.snapshot().find(id).is_some_and(|(pack, loc)| {
+            pack.file
+                .get()
+                .is_some_and(|file| Pack::matches_payload(file, loc, id, encoded).unwrap_or(false))
+        })
+    }
+
+    fn with_object<T>(&self, id: &Id, read: impl Fn(&Pack, Loc) -> io::Result<T>) -> io::Result<T> {
         let mut listing_error = None;
-        let result = self.read_listing(id, || {
+        let result = self.read_listing(id, read, || {
             listing_error = None;
             self.refresh_with(|_, e| {
                 listing_error.get_or_insert(e);
@@ -667,10 +827,15 @@ impl Packs {
         }
     }
 
-    fn read_listing(&self, id: &Id, mut list: impl FnMut() -> Arc<PackSet>) -> io::Result<Vec<u8>> {
+    fn read_listing<T>(
+        &self,
+        id: &Id,
+        read: impl Fn(&Pack, Loc) -> io::Result<T>,
+        mut list: impl FnMut() -> Arc<PackSet>,
+    ) -> io::Result<T> {
         let mut set = self.snapshot();
         for _ in 0..LISTINGS {
-            match set.find(id).map(|(p, loc)| p.read(loc)) {
+            match set.find(id).map(|(p, loc)| read(p, loc)) {
                 Some(Err(e)) if e.kind() == io::ErrorKind::NotFound => {}
                 Some(r) => return r,
                 None => {}
@@ -678,7 +843,7 @@ impl Packs {
             set = list();
         }
         match set.find(id) {
-            Some((p, loc)) => p.read(loc),
+            Some((p, loc)) => read(p, loc),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "an object of this input is missing from the input store",
@@ -782,6 +947,36 @@ mod tests {
             vec![b'a'; 4096],
             (0..5000u32).flat_map(|i| i.to_le_bytes()).collect(),
         ]
+    }
+
+    #[test]
+    fn an_observed_lz4_object_depends_on_its_payload_and_decoder_length() {
+        let _open = OPEN_IN_TESTS.read().unwrap();
+        let bytes = vec![b'a'; 4096];
+        let id = id_of(&bytes);
+        let directory = tempdir().unwrap();
+        one_pack(directory.path(), &bytes);
+        let packs = Packs::open(directory.path());
+        let (got, encoded) = packs.read_observed(&id).unwrap();
+        assert_eq!(got, bytes);
+        let encoded = encoded.unwrap();
+        assert!(packs.matches_retained(&id, Some(&encoded)));
+        assert!(!packs.matches_retained(&id, None));
+
+        for (input, length) in [(b'b', 4096), (b'a', 4097)] {
+            let other = tempdir().unwrap();
+            let mut writer = PackWriter::new(other.path()).unwrap();
+            let changed = lz4_flex::block::compress(&vec![input; 4096]);
+            writer.push(id, &changed, length, LZ4).unwrap();
+            writer.finish().unwrap();
+            let packs = Packs::open(other.path());
+            assert!(!packs.matches_retained(&id, Some(&encoded)));
+            if length == 4096 {
+                assert_eq!(packs.read(&id).unwrap(), vec![b'b'; 4096]);
+            } else {
+                assert!(packs.read(&id).is_err());
+            }
+        }
     }
 
     #[test]
@@ -989,9 +1184,14 @@ mod tests {
         for i in 0..n {
             one_pack(d.path(), format!("object {i}").as_bytes());
         }
+        let pending = ValidationPacks::open(d.path().into());
         let packs = Packs::open(d.path());
         let set = packs.snapshot();
         assert_eq!(set.packs().len(), n);
+        // The provisional listing could fill the entire budget. A native
+        // reader inside the hit callback must still get its own descriptors.
+        assert!(set.packs().iter().any(|p| p.file.get().is_some()));
+        drop(pending);
         for i in 0..n {
             let bytes = format!("object {i}").into_bytes();
             assert_eq!(packs.read(&id_of(&bytes)).unwrap(), bytes);
@@ -1039,7 +1239,7 @@ mod tests {
             set: RwLock::new(gone("first.pack")),
         };
         let mut stale = Some(gone("second.pack"));
-        let read = reader.read_listing(&id_of(b"object"), || {
+        let read = reader.read_listing(&id_of(b"object"), Pack::read, || {
             stale.take().unwrap_or_else(|| reader.refresh())
         });
         assert_eq!(read.unwrap(), b"object");
@@ -1056,7 +1256,7 @@ mod tests {
             set: RwLock::new(empty()),
         };
         let mut stale = Some(empty());
-        let read = reader.read_listing(&id_of(b"object"), || {
+        let read = reader.read_listing(&id_of(b"object"), Pack::read, || {
             stale.take().unwrap_or_else(|| reader.refresh())
         });
         assert_eq!(read.unwrap(), b"object");

@@ -108,7 +108,12 @@ fn membership(paths: Option<&[Vec<u8>]>) -> impl FnMut(&Path) -> bool + '_ {
     }
 }
 
-fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
+fn check(
+    o: &Obs,
+    rehashed: &AtomicUsize,
+    dirs: &mut DirBuf,
+    packs: &treestore::PackValidation,
+) -> Outcome {
     match o {
         Obs::File {
             path,
@@ -243,13 +248,22 @@ fn check(o: &Obs, rehashed: &AtomicUsize, dirs: &mut DirBuf) -> Outcome {
                 lossy(dir)
             )),
         },
-        // One `stat` per entry, no bytes: the name is the content address, so an
-        // entry that is still there still holds what the run read.
+        // The index and the packed bytes it names have separate lifetimes.
         Obs::Input { entry, version } => {
             if treestore::has(entry, *version) {
                 Outcome::Same
             } else {
                 Outcome::Changed(format!("input store entry {} is gone", lossy(entry)))
+            }
+        }
+        Obs::InputObject { id, encoded } => {
+            if packs.matches(id, encoded.as_ref()) {
+                Outcome::Same
+            } else {
+                Outcome::Changed(format!(
+                    "input object {} needs a native read",
+                    blake3::Hash::from(*id)
+                ))
             }
         }
     }
@@ -283,6 +297,14 @@ fn validate_links(obs: &[Obs]) -> Result<(), Mismatch> {
 /// failure: every index below it was already handed out, and a thread finishes
 /// the check it started, so the lowest failing index is among the ones seen.
 pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
+    validate_with_packs(obs, threads, &treestore::PackValidation::default())
+}
+
+pub(crate) fn validate_with_packs(
+    obs: &mut [Obs],
+    threads: usize,
+    packs: &treestore::PackValidation,
+) -> Result<Report, Mismatch> {
     validate_links(obs)?;
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
@@ -303,7 +325,7 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
                     if i >= obs.len() {
                         break;
                     }
-                    match check(&obs[i], &rehashed, &mut dirs) {
+                    match check(&obs[i], &rehashed, &mut dirs, packs) {
                         Outcome::Same => {}
                         Outcome::Refresh(o) => mine.push((i, o)),
                         Outcome::Changed(why) => {
@@ -325,6 +347,9 @@ pub fn validate(obs: &mut [Obs], threads: usize) -> Result<Report, Mismatch> {
     if failed.load(Ordering::Relaxed) {
         let why = first.into_inner().unwrap().map(|(_, w)| w);
         return Err(Mismatch(why.unwrap_or_default()));
+    }
+    if !packs.is_current() {
+        return Err(Mismatch("input packs opened during validation".into()));
     }
     let refreshes = refreshes.into_inner().unwrap();
     let refreshed = refreshes.len();

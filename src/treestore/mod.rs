@@ -50,7 +50,7 @@ use crate::store::hash::{Hash, HashAlgo, Hasher};
 use crate::store::nar::{FileType, PathFilter};
 use crate::store::path::{IngestionMethod, StorePath, make_fixed_output_path};
 use crate::sys::errno;
-use crate::trace::Obs;
+use crate::trace::{Obs, Trace};
 use std::cmp::Reverse;
 use std::sync::atomic::Ordering::{self, Relaxed};
 
@@ -124,8 +124,12 @@ impl StoredTree {
     /// less than a read of the same file under `/nix/store`. `EISDIR` for a
     /// member that is not a regular file.
     pub fn read(&self, rel: &[u8]) -> io::Result<Vec<u8>> {
+        self.read_traced(rel, &Trace::default())
+    }
+
+    pub(crate) fn read_traced(&self, rel: &[u8], trace: &Trace) -> io::Result<Vec<u8>> {
         match self.tree.resolve(rel, true) {
-            Some(Node::File { at, .. }) => self.tree.read(at),
+            Some(Node::File { at, .. }) => self.tree.read_traced(at, trace),
             Some(_) => Err(errno::is_a_directory()),
             None => Err(errno::not_found()),
         }
@@ -141,8 +145,20 @@ impl StoredTree {
         sink: &mut dyn io::Write,
         filter: &mut PathFilter<'_>,
     ) -> io::Result<()> {
-        let node = (self.tree.resolve(rel, true)).ok_or_else(errno::not_found)?;
-        self.tree.dump_filtered(node, shown, sink, filter)
+        self.dump_traced(rel, shown, sink, filter, &Trace::default())
+    }
+
+    pub(crate) fn dump_traced(
+        &self,
+        rel: &[u8],
+        shown: &Path,
+        sink: &mut dyn io::Write,
+        filter: &mut PathFilter<'_>,
+        trace: &Trace,
+    ) -> io::Result<()> {
+        let node = self.tree.resolve(rel, true).ok_or_else(errno::not_found)?;
+        self.tree
+            .dump_traced(node, Some(shown), sink, filter, trace)
     }
 }
 
@@ -159,6 +175,9 @@ pub fn locate(override_dir: Option<&str>) -> Option<PathBuf> {
 pub struct Store {
     root: OnceLock<Option<PathBuf>>,
     packs: OnceLock<Option<Arc<pack::Packs>>>,
+    // A prospective listing may lose its descriptor budget and decline.
+    // Serialize its fallible installation with a first native open.
+    first_listing: Mutex<()>,
     /// Trees opened, by store path base name. An entry is
     /// content-addressed, so one open serves every read of it; a stored
     /// `None` records a name the store does not hold, so a miss is asked
@@ -189,11 +208,82 @@ fn dir_of(name: &str) -> Option<PathBuf> {
 }
 
 fn packs() -> Option<Arc<pack::Packs>> {
-    session()
-        .trees
+    let s = session();
+    if let Some(p) = s.trees.packs.get() {
+        return p.clone();
+    }
+    let _first = s.trees.first_listing.lock().unwrap();
+    s.trees
         .packs
         .get_or_init(|| Some(Arc::new(pack::Packs::open(&root()?.join(pack::PACKS)))))
         .clone()
+}
+
+enum ValidationView {
+    Session(Arc<pack::Packs>),
+    Private(Arc<Session>, pack::ValidationPacks),
+}
+
+/// A failed lookup must not give a later evaluation access to an unlinked
+/// file. Keep newly opened pack descriptors private until the hit is used.
+#[derive(Default)]
+pub(crate) struct PackValidation {
+    view: OnceLock<Option<ValidationView>>,
+    retained_only: bool,
+}
+
+impl PackValidation {
+    pub(crate) fn for_lookup(retained_only: bool) -> Self {
+        Self {
+            retained_only,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn matches(&self, id: &pack::Id, encoded: Option<&pack::Id>) -> bool {
+        let view = self.view.get_or_init(|| {
+            let s = session();
+            if let Some(packs) = s.trees.packs.get() {
+                return packs.clone().map(ValidationView::Session);
+            }
+            if self.retained_only {
+                return None;
+            }
+            let dir = match s.trees.root.get() {
+                Some(root) => root.clone()?,
+                None => locate(None)?,
+            };
+            Some(ValidationView::Private(
+                s,
+                pack::ValidationPacks::open(dir.join(pack::PACKS))?,
+            ))
+        });
+        match view {
+            Some(ValidationView::Session(p)) => p.matches_retained(id, encoded),
+            Some(ValidationView::Private(_, p)) => p.matches(id, encoded),
+            None => false,
+        }
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        match self.view.get() {
+            Some(Some(ValidationView::Private(s, _))) => s.trees.packs.get().is_none(),
+            _ => true,
+        }
+    }
+
+    pub(crate) fn accept(self) -> bool {
+        if let Some(Some(ValidationView::Private(s, packs))) = self.view.into_inner() {
+            let _first = s.trees.first_listing.lock().unwrap();
+            if s.trees.packs.get().is_some() {
+                return false;
+            }
+            return packs
+                .adopt()
+                .is_some_and(|p| s.trees.packs.set(Some(Arc::new(p))).is_ok());
+        }
+        true
+    }
 }
 
 /// What opening the trees of this run cost, for `--timings`: reading each
@@ -598,10 +688,8 @@ pub fn collect(root: &Path, dry_run: bool) -> pack::Collected {
     })
 }
 
-/// The one observation a read of the tree store leaves in the read set. The
-/// entry's name is the NAR hash of its tree, so its presence, plus the index
-/// version that says the entry can still be read, is the whole check: there is
-/// nothing per file to stat and nothing to rehash (docs/explanation/caching.md).
+/// Record the index once per read set. Reading a regular file also records
+/// the content object that supplied its bytes.
 pub fn record(ev: &Evaluator, tree: &StoredTree, name: &str) {
     if let Some(id) = ev.trace().readset_id()
         && tree.recorded_by.load(Relaxed) != id
@@ -815,10 +903,16 @@ mod tests {
         let root = root().unwrap();
         let name = put_in(&root, &[("a", b"one")]);
         let source = SrcPath::spool(&name, b"a");
-        let expected = [Obs::Input {
-            entry: name.as_bytes().to_vec(),
-            version: spool::INDEX_VERSION,
-        }];
+        let expected = [
+            Obs::InputObject {
+                id: pack::id_of(b"one"),
+                encoded: None,
+            },
+            Obs::Input {
+                entry: name.as_bytes().to_vec(),
+                version: spool::INDEX_VERSION,
+            },
+        ];
         let evaluator = || {
             EvalConfig::new()
                 .session(session.clone())
@@ -833,6 +927,61 @@ mod tests {
         }
         source.read(&b, true).unwrap();
         assert_eq!(b.trace().take(), expected);
+    }
+
+    #[test]
+    fn a_missing_pack_invalidates_byte_reads_but_not_directory_queries() {
+        let _can_retain = pack::OPEN_IN_TESTS.read().unwrap();
+        let dir = tempdir().unwrap();
+        let fresh_session = || {
+            let s = Session::with_env(Env::isolated());
+            s.set_cache_dir(dir.path().to_str().unwrap());
+            s
+        };
+        let session = fresh_session();
+        let (mut contents, mut names, name, pack_dir) = {
+            let _entered = session.enter();
+            let root = root().unwrap();
+            let name = put_in(&root, &[("a", b"one")]);
+            let ev = EvalConfig::new()
+                .session(session.clone())
+                .trace(true)
+                .build();
+            SrcPath::spool(&name, b"").read_dir(&ev).unwrap();
+            let names = ev.trace().take();
+            assert_eq!(SrcPath::spool(&name, b"a").read(&ev, true).unwrap(), b"one");
+            let mut contents = ev.trace().take();
+            crate::trace::validate::validate(&mut contents, 2).unwrap();
+            (contents, names, name, root.join(pack::PACKS))
+        };
+        drop(session);
+        let accepted = fresh_session();
+        let declined = fresh_session();
+        for (s, accept) in [(&accepted, true), (&declined, false)] {
+            let _entered = s.enter();
+            let packs = PackValidation::default();
+            crate::trace::validate::validate_with_packs(&mut contents, 2, &packs).unwrap();
+            if accept {
+                packs.accept();
+            }
+        }
+        let stored_pack = fs::read_dir(pack_dir)
+            .unwrap()
+            .find_map(|p| {
+                let path = p.ok()?.path();
+                (path.extension()?.to_str()? == "pack").then_some(path)
+            })
+            .unwrap();
+        fs::remove_file(stored_pack).unwrap();
+        {
+            let _entered = accepted.enter();
+            assert_eq!(get(&name).unwrap().read(b"a").unwrap(), b"one");
+            crate::trace::validate::validate(&mut contents, 2).unwrap();
+        }
+        let _entered = declined.enter();
+        assert!(get(&name).unwrap().read(b"a").is_err());
+        assert!(crate::trace::validate::validate(&mut contents, 2).is_err());
+        crate::trace::validate::validate(&mut names, 2).unwrap();
     }
 
     /// A download is named by the hash of its bytes, as `nix eval` names
