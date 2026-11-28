@@ -3,10 +3,12 @@ use std::collections::HashSet;
 use std::fs;
 
 use super::{ErrorKind, EvalConfig, Evaluator, Pos};
+use hegel::generators as gs;
 use rstest::rstest;
 
 use crate::compile::Compiler;
 use crate::lint::{Config, Level};
+use crate::parallel::try_run;
 use crate::print;
 use crate::runtime::Value;
 use crate::syntax::{self, ast::FileId};
@@ -36,6 +38,31 @@ fn float_plus_starts_at_positive_zero() {
             r#"let x = builtins.fromJSON "-0.0"; in [ (toString (x + x)) (toString (builtins.add x x)) ]"#
         ),
         r#"[ "0.000000" "-0.000000" ]"#
+    );
+}
+
+#[rstest]
+#[case(1)]
+#[case(4)]
+fn deep_force_traces_list_indices(#[case] workers: usize) {
+    let error = try_run(workers, Evaluator::new(), |ev| {
+        let v = ev.eval_string(r#"[ 0 [ (throw "sentinel") ] ]"#, b"/")?;
+        ev.force_deep(v).map(|_| ())
+    })
+    .unwrap()
+    .unwrap_err();
+    let indices: Vec<_> = error
+        .trace
+        .iter()
+        .filter(|(_, m)| m.starts_with("while evaluating list element"))
+        .map(|(pos, m)| (*pos, m.as_str()))
+        .collect();
+    assert_eq!(
+        indices,
+        [
+            (Pos::NONE, "while evaluating list element at index 0"),
+            (Pos::NONE, "while evaluating list element at index 1")
+        ]
     );
 }
 
@@ -428,7 +455,7 @@ fn pure_eval_answers_like_nix() {
     );
     err(
         r#"builtins.fetchTree { type = "sourcehut"; owner = "o"; repo = "r"; }"#,
-        "an unlocked 'sourcehut' input in pure evaluation mode is not supported",
+        "in pure evaluation mode, 'fetchTree' doesn't fetch unlocked input 'sourcehut:o/r'",
     );
     for (src, want) in [
         (
@@ -736,6 +763,19 @@ fn fetch_tree_checks_type_before_forcing_other_attributes(
     assert!(error.contains(expected), "{error}");
 }
 
+#[cfg(feature = "stats2")]
+#[test]
+fn replacing_files_keeps_distinct_update_census_entries() {
+    let mut ev = Evaluator::new();
+    for _ in 0..16 {
+        ev.files = Default::default();
+        ev.eval_string("{ a = 1; } // { b = 2; }", b"/").unwrap();
+    }
+    let entries = &ev.arena.stats.census.upd.by_file;
+    assert_eq!(entries.len(), 16);
+    assert!(entries.values().all(|(_, count, _)| *count == 1));
+}
+
 #[test]
 fn update_forces_the_right_operand_first() {
     assert_eq!(
@@ -861,18 +901,13 @@ fn masks64_matches_the_scalar_masks() {
         b[i] = b'\r';
         assert_eq!(super::masks64(&b), super::masks64_scalar(&b));
     }
-    // every lane of a block once `\n`, `\r`, a high byte and a plain one
-    let mut x = 0x9e37_79b9_7f4a_7c15u64;
-    for _ in 0..20_000 {
-        let mut b = [0u8; 64];
-        for c in &mut b {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            *c = [b'\n', b'\r', 0xff, b'x'][(x % 4) as usize];
-        }
-        assert_eq!(super::masks64(&b), super::masks64_scalar(&b), "{b:?}");
-    }
+}
+
+/// Every lane of a block `\n`, `\r`, a high byte or a plain one.
+#[hegel::test(test_cases = 2000)]
+fn masks64_matches_the_scalar_masks_on_any_block(tc: hegel::TestCase) {
+    let b: [u8; 64] = tc.draw(gs::arrays(gs::sampled_from(&b"\n\r\xffx"[..])));
+    assert_eq!(super::masks64(&b), super::masks64_scalar(&b));
 }
 
 #[test]

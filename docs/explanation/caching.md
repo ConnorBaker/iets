@@ -13,6 +13,7 @@ directory with no daemon and no signature.
 | fetched inputs | `~/.cache/iets/inputs` | one file | the store path the lock implies |
 | Git clones | `~/.cache/iets/git` | one bare repository | the URL |
 | Git LFS objects | `~/.cache/iets/lfs` | one file | the object's sha256 |
+| fetched revisions | `~/.cache/iets/revs` | one file | the URL of the archive |
 
 `--no-tracing-cache` and `--no-ir-cache` turn off one cache each, and
 `--no-cache`, `IETS_CACHE=0` and the `cache` setting turn off both. Nothing
@@ -165,6 +166,7 @@ Every primop that looks at the world records one observation.
 | a directory listing's hash | `readDir` | re-list and rehash |
 | a path's kind | `pathExists`, `readFileType`, the `default.nix` probe, every search-path candidate, every marker the SCM detection probed above a flake directory, a fetched store path that the store has as valid | re-stat |
 | a copied tree's NAR hash and stat hash | `./path` coerced to a string, `builtins.path`, `filterSource`, a flake's working tree, a `path:` input | recompute the stat hash with `lstat` only; on a mismatch re-dump the NAR with the recorded filter and compare. A `path:` input also records its newest mtime, which the evaluation sees as `lastModified`, and the same bytes with another date are a change |
+| a host path component followed during pure evaluation | the project path resolver | check the link text, including the absence of a link, before validating file contents |
 | a resolved symlink | `storePath`, `builtins.path` and `filterSource` when canonicalizing changed the path | canonicalize again |
 | an environment variable, as a keyed hash | `getEnv`; `HOME` when a `~/` literal is compiled | read it again and hash it again |
 | which query of which SCM was asked in which directory, and its exit status and output | the queries of the SCM that read a flake working tree or a repository; for git, `ls-files`, `status`, `rev-parse HEAD`, `show-ref --head` for a `ref`, and `config core.attributesFile` for `export-ignore` | ask the same query again, rehash |
@@ -327,6 +329,11 @@ leaves its observations in it, which at worst costs an extra miss.
 and a hit does not evaluate, so a hit prints none of them. Lint warnings
 are different: the entry records them, and a hit replays them.
 
+`iets eval` waits for its helper workers before it saves the read set and
+lint records. A run that prints a builtin deprecation warning, such as the
+old `base32` spelling in `convertHash`, skips the cache write so the next
+evaluation can print that warning too.
+
 ## The input store: why it needs no trust
 
 A locked flake input that is not in `/nix/store` is downloaded into
@@ -373,6 +380,12 @@ only the files that changed: 4 to 5 MiB for revisions 200 commits apart,
 where a spool cost 247 MiB each. No tree is ever unpacked: with the index a
 full nixpkgs revision takes 7.7 s and 94 MB peak, unpacked 13.5 s and
 382 MB.
+
+`revs/` holds the NAR hash of each archive that was fetched by revision
+alone, one file per archive URL, so the archive is downloaded once. Unlike
+an input-store entry, these files are not verified: anyone who can write
+the cache directory can change which tree a revision maps to. Nix's fetcher
+cache is the same.
 
 The sweep removes entries, and a collection under the store's lock then
 removes the packs no entry names and rewrites a pack that is mostly dead. A

@@ -457,14 +457,14 @@ A name falls back in these cases:
      pure evaluation;
    - `fetchTarball` and `fetchurl` without a `sha256`;
    - `fetchTree` with a URL string, with an input type other than `path`,
-     `github`, `gitlab`, `sourcehut`, `git` or `tarball`, or without
-     a `narHash` for a type other than `path`, or, in pure evaluation,
+     `github`, `gitlab`, `sourcehut`, `git` or `tarball`, without a
+     `narHash` for `git` or `tarball`, without a `narHash` and a `rev`
+     for `github`, `gitlab` or `sourcehut`, or, in pure evaluation,
      without a `rev` for a type other than `path` and `tarball`;
    - `getFlake` on anything but a local path or local SCM reference.
      Pure evaluation needs a matching `narHash` for a path or a locked SCM revision,
      and local SCM sources outside the native allow list also fall back.
-   - a flake reference iets does not parse (`hg+…`, `sourcehut:`, an
-     IP-literal host; `docs/reference/divergences.md`);
+   - a flake reference iets does not parse (`hg+…`, an IP-literal host; `docs/reference/divergences.md`);
    - `getContext` on the output of a dynamic derivation;
    - import from derivation: `import`, `scopedImport`, `readFile`,
      `readDir`, `pathExists`, `readFileType` or `hashFile` on a derivation

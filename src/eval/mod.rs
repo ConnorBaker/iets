@@ -69,6 +69,8 @@ impl CorePkgs {
 }
 
 pub struct FileInfo {
+    #[cfg(feature = "stats2")]
+    census_id: usize,
     pub path: Vec<u8>,
     pub base: u32,
     pub line_starts: Vec<u32>,
@@ -84,6 +86,8 @@ impl FileInfo {
     pub(crate) fn new(path: Vec<u8>, src: &[u8], base: u32) -> FileInfo {
         let line_starts = newline_starts(src).unwrap_or_else(|| syntax::line_starts(src));
         FileInfo {
+            #[cfg(feature = "stats2")]
+            census_id: census::next_file_id(),
             path,
             base,
             line_starts,
@@ -404,12 +408,12 @@ pub struct Evaluator {
 }
 
 /// A position in a record, `file:line:column`, the way an error names one.
-pub enum At {
-    Known(&'static [u8], u32, u32),
+pub enum At<'a> {
+    Known(&'a [u8], u32, u32),
     None,
 }
 
-impl Field for At {
+impl Field for At<'_> {
     fn write(self, out: &mut Vec<u8>) {
         let start = out.len();
         match self {
@@ -918,7 +922,7 @@ impl Evaluator {
     }
 
     /// The file holding `pos` and the offset inside it.
-    pub fn file_of(&self, pos: Pos) -> Option<(&'static FileInfo, u32)> {
+    pub fn file_of(&self, pos: Pos) -> Option<(&FileInfo, u32)> {
         self.files.file_of(pos)
     }
 
@@ -1584,26 +1588,33 @@ impl Evaluator {
                     return Ok(());
                 }
                 for attr in a.iter() {
-                    let v = self.force_cell(&attr.cell).map_err(|mut e| {
-                        e.add_trace(
-                            attr.pos,
-                            format!(
-                                "while evaluating the attribute '{}'",
-                                self.interner.name_str(attr.sym)
-                            ),
-                        );
-                        e
-                    })?;
-                    self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen))?;
+                    // the frame is for an error anywhere below the attribute,
+                    // as in Nix's `forceValueDeep` and the parallel walk
+                    self.force_cell(&attr.cell)
+                        .and_then(|v| self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen)))
+                        .map_err(|mut e| {
+                            e.add_trace(
+                                attr.pos,
+                                format!(
+                                    "while evaluating the attribute '{}'",
+                                    self.interner.name_str(attr.sym)
+                                ),
+                            );
+                            e
+                        })?;
                 }
             }
             Value::List(l) => {
                 if !seen.insert(w.bits()) {
                     return Ok(());
                 }
-                for c in l.cells() {
-                    let v = self.force_cell(c)?;
-                    self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen))?;
+                for (i, c) in l.cells().iter().enumerate() {
+                    self.force_cell(c)
+                        .and_then(|v| self.deeper(Pos::NONE, |ev| ev.force_deep_inner(v, seen)))
+                        .map_err(|mut e| {
+                            e.add_list_trace(Pos::NONE, i);
+                            e
+                        })?;
                 }
             }
             _ => {}
@@ -2595,7 +2606,7 @@ impl Evaluator {
             *pos,
             "in the right operand of the list concatenation operator",
         )?;
-        Ok(self.concat_lists(&[a, b]))
+        self.concat_lists(&[a, b], *pos)
     }
 
     #[inline(never)]
@@ -3235,19 +3246,27 @@ impl Evaluator {
         (path, bytes, nested): (usize, usize, bool),
     ) {
         let file = self
+            .files
             .file_of(pos)
-            .map(|(f, _)| (f as *const FileInfo as usize, &f.path[..]));
+            .map(|(f, _)| (f.census_id, &f.path[..]));
         let bytes = (self.arena.bytes_allocated - bytes) as u64;
         let census = &mut self.arena.stats.census;
         census.upd.nested_right += nested as u64;
         census.note_upd(path, a, b, out, bytes, file);
     }
 
-    pub fn concat_lists(&mut self, lists: &[&'static ListObj]) -> Word {
-        let total: usize = lists.iter().map(|l| l.len as usize).sum();
-        if let Some(l) = lists.iter().find(|l| l.len as usize == total) {
-            return Word::from_ref(*l);
+    /// Each list fits a `ListObj`; their sum need not.
+    pub fn concat_lists(&mut self, lists: &[&'static ListObj], pos: Pos) -> EvalResult<Word> {
+        let total: u64 = lists.iter().map(|l| u64::from(l.len)).sum();
+        if let Some(l) = lists.iter().find(|l| u64::from(l.len) == total) {
+            return Ok(Word::from_ref(*l));
         }
+        let Some(total) = usize::try_from(total)
+            .ok()
+            .filter(|&n| Arena::list_bytes(n).is_some())
+        else {
+            bail!(ErrorKind::Eval, pos, "out of memory");
+        };
         let out = self.arena.alloc_list_as(total, Stat::ListConcat);
         let cells = out.cells();
         let mut k = 0;
@@ -3257,7 +3276,7 @@ impl Evaluator {
                 k += 1;
             }
         }
-        Word::from_ref(out)
+        Ok(Word::from_ref(out))
     }
 
     pub fn arith(&mut self, a: Word, b: Word, op: ArithOp, pos: Pos) -> EvalResult<Word> {
@@ -3484,7 +3503,7 @@ impl Evaluator {
 
     /// `pos` as a record field, without the `String` [`Self::describe_pos`]
     /// builds.
-    pub fn at(&self, pos: Pos) -> At {
+    pub fn at(&self, pos: Pos) -> At<'_> {
         match self.file_of(pos) {
             Some((f, off)) => {
                 let (line, col) = f.line_col(off);

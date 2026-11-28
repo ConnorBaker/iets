@@ -44,13 +44,13 @@ prints.
 - iets does not take these, so classic mode falls back to Nix on them:
   - registry references (`nixpkgs#hello`, and `x#y` even where `./x`
     exists, as in Nix);
-  - remote references (`github:`, `gitlab:`, `git+https:`, `git+ssh:`,
-    `git:`, `https://….tar.gz`, and a `file:` URL that names no absolute
-    path on this machine, `file://host/p` included): iets cannot fetch a
-    root flake;
+  - remote references (`github:`, `gitlab:`, `sourcehut:`, `git+https:`,
+    `git+ssh:`, `git:`, `https://….tar.gz`, and a `file:` URL that names
+    no absolute path on this machine, `file://host/p` included): iets
+    cannot fetch a root flake;
   - `?query` parameters on a path (`?dir=`, `?rev=`, `?narHash=`), except
     `?submodules=1` on a bare local Git working-tree path;
-  - the schemes the parser does not take (`hg+…`, `sourcehut:`).
+  - the schemes the parser does not take (`hg+…`).
 
   Some invalid references are accepted, and an unknown scheme
   (`foo:bar#x`) is unsupported. `docs/reference/divergences.md` lists
@@ -88,11 +88,11 @@ first, then a URL, then a path, as Nix's does.
 | `flake:` | yes |
 | `github:` | yes |
 | `gitlab:` | yes |
+| `sourcehut:` | yes |
 | `path:`, an absolute path | yes |
 | `git:`, `git+…` | yes |
 | `tarball+…` | yes |
 | `file+…`, plain `http(s)` and `file` URLs | yes |
-| `sourcehut:` | no: unsupported |
 | `hg+…`, any other scheme or type | no: unsupported |
 
 Each scheme keeps the query parameters Nix keeps for it. As in Nix,
@@ -240,10 +240,25 @@ targets (`docs/reference/builders.md`).
 substitute it, and it has no input store entry, because its content address
 is not a flake `narHash`.
 
-## `fetchTree` result
+## `fetchTree`
 
-`builtins.fetchTree` on a locked node gets the store path from `narHash`.
-It returns the attributes Nix returns:
+What each input type needs:
+
+| Type | Needs | In pure evaluation |
+|---|---|---|
+| `path` | an absolute `path` | also a `narHash` |
+| `github`, `gitlab`, `sourcehut` | a `rev` (a full commit hash) | the same |
+| `git` | a `narHash` | also a `rev` |
+| `tarball` | a `narHash` | the same |
+
+Other types and a URL argument are errors. A flake's lock file needs a
+`narHash` for every node except a relative `path` input.
+
+A `github`, `gitlab` or `sourcehut` input with only a `rev` is downloaded
+on first use. Later runs reuse it. With only a `narHash`, it is read from
+a store that already has the tree, but cannot be downloaded.
+
+The result has the attributes Nix returns:
 
 - `outPath` and `narHash`;
 - `rev` and `shortRev`, when `rev` is there;
@@ -255,12 +270,11 @@ It returns the attributes Nix returns:
 `revCount` has Nix's value, but it is deprecated
 (`docs/reference/lints.md`, `rev-count`).
 
-A `path` input is NAR-hashed, checked against `narHash` when the lock has
-one, and is a virtual copy, like the root. A relative `path:` input
+A `path` input is NAR-hashed, checked against `narHash` when it has one,
+and is a virtual copy, like the root. A relative `path:` input
 (`path:./sub`) never reaches `fetchTree`. `nix flake lock` writes it as
 `{ path = "./sub"; type = "path"; }` with no `narHash`, iets accepts that,
-and `call-flake.nix` finds it under the parent's `outPath`. An unlocked
-remote input (no `narHash`) and a URL argument are errors.
+and `call-flake.nix` finds it under the parent's `outPath`.
 
 ## The root tree
 

@@ -21,7 +21,7 @@ use std::ffi::OsStr;
 use std::io::ErrorKind::{NotADirectory, NotFound};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io, mem};
@@ -126,6 +126,12 @@ pub enum Obs {
         path: Vec<u8>,
         target: Option<Vec<u8>>,
     },
+    /// A host component examined by a path resolver. A miss records
+    /// that it did not redirect the walk, including when it did not exist.
+    ReadLink {
+        path: Vec<u8>,
+        target: Option<Vec<u8>>,
+    },
     /// `value` is a keyed hash, not the value: the observation needs only to
     /// know whether the value changed, and an entry that held the answer of
     /// every `getEnv` in clear would be a file of the user's secrets.
@@ -162,6 +168,7 @@ impl Obs {
                 (3, Cow::Borrowed(root), u8::from(filtered.is_some()))
             }
             Obs::Canon { path, .. } => (4, Cow::Borrowed(path), 0),
+            Obs::ReadLink { path, .. } => (8, Cow::Borrowed(path), 0),
             Obs::Env { name, .. } => (5, Cow::Borrowed(name), 0),
             Obs::Cmd { dir, query, .. } => (6, Cow::Borrowed(dir), query.to_u8()),
             Obs::Input { entry, .. } => (7, Cow::Borrowed(entry), 0),
@@ -319,8 +326,17 @@ pub fn cmd_hash(status: i32, stdout: &[u8]) -> Digest32 {
     h.finalize().into()
 }
 
+/// Zero denotes a tree that no recorder has observed. A new read set never
+/// takes an old one's identity, even when their recorder allocations are reused.
+fn next_readset() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .expect("read set ids exhausted")
+}
+
 struct Inner {
     obs: Mutex<Vec<Obs>>,
+    readset: AtomicU64,
     uncacheable: AtomicBool,
     /// Where the run keeps its entry, and what follows from a revision.
     store: Option<store::Store>,
@@ -338,6 +354,7 @@ impl Trace {
     pub fn enabled_in(store: Option<store::Store>) -> Trace {
         Trace(Some(Arc::new(Inner {
             obs: Mutex::new(Vec::new()),
+            readset: AtomicU64::new(next_readset()),
             uncacheable: AtomicBool::new(false),
             store,
         })))
@@ -360,10 +377,25 @@ impl Trace {
         self.0.is_some()
     }
 
+    pub(crate) fn readset_id(&self) -> Option<u64> {
+        Some(self.0.as_ref()?.readset.load(Ordering::Relaxed))
+    }
+
     pub fn record(&self, o: Obs) {
         if let Some(i) = &self.0 {
             i.obs.lock().unwrap().push(o);
         }
+    }
+
+    pub(crate) fn read_link(&self, path: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        let target = link_target(path)?;
+        if self.is_on() {
+            self.record(Obs::ReadLink {
+                path: path.to_vec(),
+                target: target.clone(),
+            });
+        }
+        Ok(target)
     }
 
     pub fn mark_uncacheable(&self) {
@@ -384,7 +416,11 @@ impl Trace {
         let Some(i) = &self.0 else {
             return Vec::new();
         };
-        let all = mem::take(&mut *i.obs.lock().unwrap());
+        let all = {
+            let mut obs = i.obs.lock().unwrap();
+            i.readset.store(next_readset(), Ordering::Relaxed);
+            mem::take(&mut *obs)
+        };
         // one pass to find the subjects that repeat, and a second that encodes
         // only those: comparing each repeat with every earlier observation was
         // quadratic, and 80,000 of one subject took 12 s
@@ -602,6 +638,16 @@ const RACY_NS: i64 = 2_000_000_000;
 
 /// Never an mtime a file has, so the next validation rehashes.
 const UNTRUSTED_MTIME: i64 = i64::MIN;
+
+fn link_target(path: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    let at = sys::native_path(path);
+    match fs::symlink_metadata(&at) {
+        Ok(m) if m.is_symlink() => fs::read_link(&at).map(|p| Some(sys::path_to_internal(&p))),
+        Ok(_) => Ok(None),
+        Err(e) if matches!(e.kind(), NotFound | NotADirectory) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 
 pub fn file_obs(path: &[u8], meta: &fs::Metadata, hash: Digest32) -> Obs {
     let at = sys::native_path(path);
