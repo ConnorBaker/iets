@@ -87,7 +87,9 @@ pub fn read_bytes(r: &mut dyn Read, max: u64) -> io::Result<Vec<u8>> {
 pub const MAX_STRING: u64 = 64 << 20;
 
 pub fn read_str(r: &mut dyn Read) -> io::Result<String> {
-    Ok(String::from_utf8_lossy(&read_bytes(r, MAX_STRING)?).into_owned())
+    let bytes = read_bytes(r, MAX_STRING)?;
+    Ok(String::from_utf8(bytes)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
 }
 
 pub fn read_strs(r: &mut dyn Read) -> io::Result<Vec<String>> {
@@ -516,6 +518,16 @@ mod tests {
         let mut r = out.as_slice();
         assert_eq!(read_str(&mut r).unwrap(), "hello");
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn strings_replace_invalid_utf8() {
+        let mut out = Vec::new();
+        write_str(&mut out, b"caf\xc3\xa9 \xff\xfe \xe2\x82").unwrap();
+        assert_eq!(
+            read_str(&mut out.as_slice()).unwrap(),
+            "café \u{fffd}\u{fffd} \u{fffd}"
+        );
     }
 
     #[test]
