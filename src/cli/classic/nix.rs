@@ -4,6 +4,7 @@
 //! for everything else.
 //! See `docs/reference/classic.md`.
 
+use std::iter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -430,7 +431,7 @@ fn prefetch_inputs_main(argv: &[String], rest: &[String]) -> i32 {
     thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(session::bind(|| {
-                while let Some((name, r)) = queue.lock().unwrap().next() {
+                for (name, r) in iter::from_fn(|| queue.lock().unwrap().next()) {
                     let mut ev = EvalConfig::new().system(&system).pure(pure).build();
                     if let Some(h) = r.nar_hash() {
                         ev.input_names.insert(h.to_string(), name);
