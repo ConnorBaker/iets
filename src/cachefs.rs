@@ -489,16 +489,23 @@ pub fn prepare(root: &Path, shape: Shape, timings: bool) -> bool {
             return false;
         }
     }
-    if create_dir(root).is_ok() && fs::read(root.join(VERSION)).is_err() {
+    let created = create_dir(root);
+    if created.is_ok() && fs::read(root.join(VERSION)).is_err() {
         let _ = write_atomic(root, VERSION, &[format(shape)]);
     }
     tighten(root);
     // after tightening, so only a root iets cannot make private is refused
     if !fs::symlink_metadata(root).is_ok_and(|m| m.is_dir() && sysfs::private_to_me(&m)) {
-        errln!(
-            "error: the cache {} is not a directory only this user can open, so iets will not use it",
-            root.display()
-        );
+        match created {
+            Err(e) => errln!(
+                "error: cannot create cache directory {}: {e}",
+                root.display()
+            ),
+            Ok(()) => errln!(
+                "error: the cache {} is not a directory only this user can open, so iets will not use it",
+                root.display()
+            ),
+        }
         return false;
     }
     true

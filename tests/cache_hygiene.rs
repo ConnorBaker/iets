@@ -337,6 +337,34 @@ fn an_input_observation_marks_its_entry_as_used() {
 }
 
 #[rstest]
+fn cache_directory_creation_reports_the_os_error(bin: Iets) {
+    let dir = tempdir().unwrap();
+    let blocker = dir.path().join("file");
+    fs::write(&blocker, "keep").unwrap();
+    let cache = blocker.join("cache");
+    let ir = cache.join("ir");
+    let cause = fs::create_dir_all(&ir).unwrap_err();
+    let out = bin
+        .cmd()
+        .args(["eval", "--no-tracing-cache", "--cache-dir"])
+        .arg(cache)
+        .args(["--expr", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"1\n");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!(
+            "cannot create cache directory {}: {cause}",
+            ir.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(blocker).unwrap(), b"keep");
+}
+
+#[rstest]
 fn cache_gc_removes_entries_past_the_ttl(bin: Iets) {
     let dir = tempdir().unwrap();
     let path = dir.path().to_str().expect("utf-8 path");
