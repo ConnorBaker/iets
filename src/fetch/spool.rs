@@ -701,6 +701,22 @@ impl Tree {
         self.write(&self.root, None, sink, &mut |_, _| true)
     }
 
+    /// Writes one regular file's NAR and hashes the payload as the writer reads it.
+    pub(crate) fn dump_file(&self, sink: &mut dyn Write, algo: HashAlgo) -> io::Result<Hash> {
+        let Node::File { at, exec } = &self.root else {
+            return Err(io::Error::other("a flat fixed output is one regular file"));
+        };
+        let mut file = HashingReader {
+            src: self.blob(at)?,
+            hash: Hasher::new(algo),
+        };
+        let mut w = TreeWriter::new(sink);
+        w.header()?;
+        w.regular(*exec, at.size(), &mut file)?;
+        w.flush()?;
+        Ok(file.hash.finish())
+    }
+
     /// The NAR of `node`, with `filter` asked about every entry below it under
     /// the path Nix would show (`shown`), as `nar::dump_path` asks.
     pub fn dump_filtered(
@@ -1146,6 +1162,19 @@ fn dereference(mut root: Dir) -> Dir {
     }
 }
 
+struct HashingReader<'a> {
+    src: Box<dyn Read + 'a>,
+    hash: Hasher,
+}
+
+impl Read for HashingReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.src.read(buf)?;
+        self.hash.update(&buf[..n]);
+        Ok(n)
+    }
+}
+
 /// A member's bytes, read by `pread` from where they lie: the spooled archive,
 /// or the side file that holds the expanded sparse members. The NAR writer
 /// pulls through its own buffer, so no chunk of a member is ever held twice.
@@ -1423,6 +1452,18 @@ pub(crate) mod tests {
         let mut spool = Spool::scratch().unwrap();
         spool.write_all(&plain).unwrap();
         Tree::index(spool, u64::MAX).unwrap()
+    }
+
+    #[test]
+    fn a_flat_executable_keeps_its_mode_in_the_nar() {
+        let mut tree = spooled(&[("script", REG, 0o755, b"#!/bin/sh\n")]);
+        tree.root = tree.resolve(b"script", false).and_then(Node::copy).unwrap();
+        assert!(matches!(tree.root, Node::File { exec: true, .. }));
+        let (mut got, mut want) = (Vec::new(), Vec::new());
+        let flat = tree.dump_file(&mut got, HashAlgo::Sha512).unwrap();
+        tree.dump(&mut want).unwrap();
+        assert_eq!(got, want);
+        assert_eq!(Some(flat), tree.file_hash(HashAlgo::Sha512).unwrap());
     }
 
     /// A stored tree is the tree that was fetched: the same NAR, member for

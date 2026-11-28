@@ -485,16 +485,14 @@ fn store(
     // made while the NAR is hashed: a mismatch drops the pack unnamed
     let (nar, objects) = thread::scope(|s| {
         let nar = s.spawn(|| -> io::Result<(u64, Hash, Option<Hash>)> {
-            let flat = match method {
-                IngestionMethod::Flat => {
-                    Some(tree.file_hash(expect.algo)?.ok_or_else(|| {
-                        io::Error::other("a flat fixed output is one regular file")
-                    })?)
-                }
-                _ => None,
-            };
             let mut h = Hasher::new(nar_algo);
-            tree.dump(&mut h)?;
+            let flat = match method {
+                IngestionMethod::Flat => Some(tree.dump_file(&mut h, expect.algo)?),
+                _ => {
+                    tree.dump(&mut h)?;
+                    None
+                }
+            };
             Ok((h.bytes_written(), h.finish(), flat))
         });
         let objects = objects(&tree, &packs, &mut writer);
