@@ -219,6 +219,22 @@ impl Nix {
         Ok(())
     }
 
+    /// All attribute-path installables select from the same expression or file.
+    pub(super) fn attr_path_root(
+        &self,
+        ev: &mut Evaluator,
+        cwd: &[u8],
+    ) -> EvalResult<Option<Word>> {
+        if let Some(expr) = &self.expr {
+            return ev.eval_string(expr, cwd).map(Some);
+        }
+        if let Some(file) = &self.file {
+            let path = lookup_file_arg(ev, file, cwd)?;
+            return ev.eval_file(&path, Pos::NONE).map(Some);
+        }
+        Ok(None)
+    }
+
     /// `ec` as one run of `subcommand` with its tracing cache. The key is
     /// what changes the answer: the installables, `--expr` or `--file`, the
     /// `--arg`s, the search path, `pure-eval`, `--json` and `--raw`
@@ -316,7 +332,8 @@ fn eval_run(ev: &mut Evaluator, n: &Nix) -> error::Result<Vec<u8>> {
     let cwd = cwd();
     let mut out: Vec<u8> = Vec::new();
     let what = n.installables.first().map_or(".", String::as_str);
-    let v = resolve(ev, n, what, &cwd)?;
+    let root = n.attr_path_root(ev, &cwd)?;
+    let v = resolve(ev, n, what, &cwd, root)?;
     // installables.cc: the installable's value is forced before printing,
     // so an error at the top level is reported instead of printed.
     let v = ev.force(v)?;
@@ -378,8 +395,9 @@ fn build_main(argv: &[String], rest: &[String]) -> i32 {
 fn build_run(ev: &mut Evaluator, n: &Nix) -> error::Result<(Vec<installable::Install>, Box<Plan>)> {
     let cwd = cwd();
     let mut targets: Vec<installable::Install> = Vec::new();
+    let root = n.attr_path_root(ev, &cwd)?;
     for what in &n.installables {
-        let v = resolve(ev, n, what, &cwd)?;
+        let v = resolve(ev, n, what, &cwd, root)?;
         targets.push(installable::to_install(
             ev,
             v,
@@ -468,17 +486,17 @@ fn dev_env_main(argv: &[String], rest: &[String]) -> i32 {
 
 /// The value one installable names: an attribute of the `--expr`/`--file`
 /// value, or a flake output attribute.
-pub(super) fn resolve(ev: &mut Evaluator, n: &Nix, what: &str, cwd: &[u8]) -> EvalResult<Word> {
-    let args = auto_args(ev, &n.c.flags.args, cwd)?;
-    // installable-attr-path.cc:parse: `.` is the whole value.
-    let attr = if what == "." { "" } else { what };
-    if let Some(e) = &n.expr {
-        let root = ev.eval_string(e, cwd)?;
-        return installable::find_along_attr_path(ev, root, attr, args);
-    }
-    if let Some(f) = &n.file {
-        let p = lookup_file_arg(ev, f, cwd)?;
-        let root = ev.eval_file(&p, Pos::NONE)?;
+pub(super) fn resolve(
+    ev: &mut Evaluator,
+    n: &Nix,
+    what: &str,
+    cwd: &[u8],
+    root: Option<Word>,
+) -> EvalResult<Word> {
+    if let Some(root) = root {
+        // installable-attr-path.cc:parse: `.` is the whole value.
+        let attr = if what == "." { "" } else { what };
+        let args = auto_args(ev, &n.c.flags.args, cwd)?;
         return installable::find_along_attr_path(ev, root, attr, args);
     }
     if what.contains('^') || ev.is_store_path_text(what.as_bytes()) {

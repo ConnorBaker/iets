@@ -48,8 +48,9 @@ pub fn main(argv: &[String], rest: &[String]) -> i32 {
     print_cached(argv, run, move |ev| {
         let cwd = cwd();
         let mut roots = Vec::new();
+        let root = n.attr_path_root(ev, &cwd)?;
         for what in &n.installables {
-            let v = resolve(ev, &n, what, &cwd)?;
+            let v = resolve(ev, &n, what, &cwd, root)?;
             roots.push(installable::to_derivation(ev, v, what)?);
         }
         Ok(drvshow::json_text(

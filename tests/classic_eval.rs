@@ -1475,6 +1475,26 @@ in {
     });
     assert!(nested.real.status.success(), "{}", show(&nested));
     c.same("derivation show nested dynamic inputs", &nested);
+    let expr = r#"builtins.trace "root" ({ x }: { inherit x; })"#;
+    let arg = format!(r#"builtins.trace "arg" (import {def})"#);
+    let args = [
+        "derivation",
+        "show",
+        "--impure",
+        "--expr",
+        expr,
+        "--arg",
+        "x",
+        &arg,
+        "x",
+        "x",
+    ];
+    let shared = f.both_with("nix", &args, |cmd| {
+        cmd.env("IETS_NIX_FALLBACK", "never");
+    });
+    assert!(shared.real.status.success(), "{}", show(&shared));
+    c.same("shared expression", &shared);
+    assert_eq!(stderr(&shared.ours), stderr(&shared.real));
     let pkg = format!("{r}#pkg");
     let mut cases: Vec<(&str, Vec<&str>)> = vec![
         ("a custom drv", vec!["-f", &def]),
