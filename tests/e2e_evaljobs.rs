@@ -12,8 +12,11 @@ mod hermetic;
 use hermetic::{Iets, bin};
 use rstest::rstest;
 
+use sha2::{Digest, Sha256};
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, File};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::str;
@@ -533,10 +536,6 @@ fn job_paths_require_utf8(bin: Iets, #[case] memory: &str) {
 #[case::walk("0")]
 #[case::collector("1024")]
 fn job_argument_bytes(bin: Iets, #[case] memory: &str) {
-    use sha2::{Digest, Sha256};
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-
     let expr = r#"{ x }: { job = derivation { name = builtins.hashString "sha256" x; system = "x"; builder = ":"; }; }"#;
     let run = |cmd: &mut Command, value: &[u8]| {
         let out = ok(cmd.args(["--max-memory-size", memory, "--expr", expr]));
@@ -556,7 +555,11 @@ fn job_argument_bytes(bin: Iets, #[case] memory: &str) {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(OsStr::from_bytes(b"input-\xff"));
+    #[cfg(target_os = "linux")]
+    let name = OsStr::from_bytes(b"input-\xff");
+    #[cfg(not(target_os = "linux"))]
+    let name = OsStr::new("input");
+    let path = dir.path().join(name);
     fs::write(&path, mixed).unwrap();
     run(ci(&bin).args(["--arg-from-file", "x"]).arg(&path), mixed);
     run(

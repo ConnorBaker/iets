@@ -26,6 +26,7 @@ use super::line::{Line, json_str, json_str_list, split_object, stats_json};
 use super::{
     FNV_BASIS, Node, attr_join, error_line, find_along_attr_path, fnv_step, node, validate_names,
 };
+use crate::argv;
 use crate::error::{Error, Result};
 use crate::eval::Evaluator;
 use crate::ignored;
@@ -209,7 +210,7 @@ impl Proc {
             .arg("eval-jobs")
             .arg("--worker")
             .env("IETS_SESSION_ID", log::session_id())
-            .args(args.iter().map(|a| crate::argv::os(a)))
+            .args(args.iter().map(|a| argv::os(a)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
