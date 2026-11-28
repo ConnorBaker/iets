@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -139,15 +140,17 @@ fn parse(argv: &[String]) -> (BuildArgs, EvalArgs) {
 /// One `EvalArgs` per installable, sorted and without repeats, so every order
 /// of the same set is one job and one cache entry.
 fn installables(a: &EvalArgs) -> Vec<EvalArgs> {
-    let mut all: Vec<EvalArgs> = Vec::new();
-    for input in a.more.iter().cloned().chain(a.input.clone()) {
-        let mut one = a.clone();
-        one.more = Vec::new();
-        one.input = Some(input);
-        all.push(one);
+    let mut common = a.clone();
+    if common.more.is_empty() {
+        return vec![common];
     }
-    if all.is_empty() {
-        all.push(a.clone());
+    let more = mem::take(&mut common.more);
+    let mut all = Vec::with_capacity(more.len() + 1);
+    for input in more.into_iter().chain(common.input.take()) {
+        all.push(EvalArgs {
+            input: Some(input),
+            ..common.clone()
+        });
     }
     all.sort_by_cached_key(label);
     all.dedup_by_key(|a| label(a));
