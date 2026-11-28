@@ -541,7 +541,9 @@ fn job_argument_bytes(bin: Iets, #[case] memory: &str) {
     let run = |cmd: &mut Command, value: &[u8]| {
         let out = ok(cmd.args(["--max-memory-size", memory, "--expr", expr]));
         let row: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(row["name"], format!("{:x}", Sha256::digest(value)));
+        let mut expected = String::new();
+        iets::store::hash::base16_encode_into(&mut expected, &Sha256::digest(value));
+        assert_eq!(row["name"], expected);
     };
     let mixed = b"a\xf4\x8f\xbe\x80\xff\xf4\x8f\xbf\xbfb";
     for value in [b"".as_slice(), b"ordinary", mixed] {
