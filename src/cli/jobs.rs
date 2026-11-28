@@ -1,5 +1,6 @@
 //! `iets eval-jobs`: flags, the three process roles, and the summary.
 
+use crate::api::{ArgKind, last_auto_args};
 use crate::session::exit;
 
 use crate::cli::help::{self, arg_error, value};
@@ -17,7 +18,7 @@ use crate::jobs::{self, Line, Opts};
 use crate::remote::worker::{Connection, Transport};
 use crate::runtime::Word;
 use crate::session::{self, Session};
-use crate::{ignored, log};
+use crate::{argv, ignored, log};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufWriter};
@@ -166,13 +167,13 @@ fn jobs_eval_args(argv: &[String], rest: &[String], j: &mut JobsArgs) -> EvalArg
     }
     let mut flags = Vec::new();
     let mut a = cli::parse_eval_args_with_bindings(rest, |flag| flags.push(flag));
-    let winners: HashMap<_, _> = crate::api::last_auto_args(&a.args)
+    let winners: HashMap<_, _> = last_auto_args(&a.args)
         .into_iter()
         .map(|i| (flags[i], i))
         .collect();
     // Nix reads the surviving sources in the name order of its autoArgs map.
     j.sources
-        .sort_by_cached_key(|&(flag, _)| crate::argv::bytes(&argv[flag + 1]));
+        .sort_by_cached_key(|&(flag, _)| argv::bytes(&argv[flag + 1]));
     for (flag, forwarded) in j.sources.drain(..) {
         let selected = winners.get(&forwarded);
         let stdin = argv[flag] == "--arg-from-stdin";
@@ -192,7 +193,7 @@ fn jobs_eval_args(argv: &[String], rest: &[String], j: &mut JobsArgs) -> EvalArg
             j.stdin_args.push((flag, contents.clone()));
         }
         if let Some(&i) = selected {
-            a.args[i].1 = crate::api::ArgKind::Str(contents);
+            a.args[i].1 = ArgKind::Str(contents);
         }
     }
     // Worker argv replacements are spliced in the original command-line order.
