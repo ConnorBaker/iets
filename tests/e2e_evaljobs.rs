@@ -14,6 +14,10 @@ use rstest::rstest;
 
 use std::env;
 use std::fs::{self, File};
+#[cfg(target_os = "linux")]
+use std::io::{self, Write};
+#[cfg(target_os = "linux")]
+use std::os::{fd::AsRawFd, unix::process::CommandExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::str;
@@ -533,9 +537,6 @@ fn job_paths_require_utf8(bin: Iets, #[case] memory: &str) {
 #[cfg(target_os = "linux")]
 #[rstest]
 fn the_collector_does_not_drain_file_arguments(bin: Iets) {
-    use std::io::{self, Write};
-    use std::os::{fd::AsRawFd, unix::process::CommandExt};
-
     let (read, mut write) = io::pipe().unwrap();
     write.write_all(b"aarch64-linux").unwrap();
     drop(write);
