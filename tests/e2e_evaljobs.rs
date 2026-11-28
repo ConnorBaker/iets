@@ -529,6 +529,42 @@ fn job_paths_require_utf8(bin: Iets, #[case] memory: &str) {
     );
 }
 
+/// A shell process substitution names a pipe, which can be read only once.
+#[cfg(target_os = "linux")]
+#[rstest]
+fn the_collector_does_not_drain_file_arguments(bin: Iets) {
+    use std::io::{self, Write};
+    use std::os::{fd::AsRawFd, unix::process::CommandExt};
+
+    let (read, mut write) = io::pipe().unwrap();
+    write.write_all(b"aarch64-linux").unwrap();
+    drop(write);
+    let path = format!("/proc/self/fd/{}", read.as_raw_fd());
+    let mut c = bin.cmd();
+    c.args([
+        "eval-jobs",
+        "--workers",
+        "1",
+        "--no-instantiate",
+        "--arg-from-file",
+        "system",
+        &path,
+        "--max-memory-size",
+        "4096",
+        "--expr",
+        r#"{ system }: { job = derivation { inherit system; name = "job"; builder = ":"; }; }"#,
+    ]);
+    // Only the child inherits the descriptor, as with Bash's <(printf ...).
+    // fcntl is async-signal-safe between fork and exec.
+    unsafe {
+        c.pre_exec(move || {
+            rustix::io::fcntl_setfd(&read, rustix::io::FdFlags::empty()).map_err(Into::into)
+        });
+    }
+    let row: Value = serde_json::from_slice(&ok(&mut c).stdout).unwrap();
+    assert_eq!(row["system"], "aarch64-linux");
+}
+
 #[rstest]
 fn worker_keeps_flag_shaped_include_operand(bin: Iets) {
     let system = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evaljobs/system.txt");

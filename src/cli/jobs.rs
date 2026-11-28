@@ -51,6 +51,12 @@ struct JobsArgs {
     quiet: bool,
 }
 
+impl JobsArgs {
+    fn collector(&self) -> bool {
+        !self.worker && self.max_memory > 0 && !cfg!(target_os = "wasi")
+    }
+}
+
 fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
     let mut j = JobsArgs {
         opts: Opts {
@@ -77,6 +83,7 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
         quiet: false,
     };
     let mut rest: Vec<String> = Vec::new();
+    let mut sources = Vec::new();
     let mut i = 0;
     let arg = |i: &mut usize| -> String {
         *i += 1;
@@ -134,21 +141,16 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
                 "iets evaluates locked flakes only; an override makes the lock file incomplete",
             ),
             "--repair" => unsupported(s, "iets does not write or repair store paths"),
-            "--arg-from-file" => {
-                let name = arg(&mut i);
-                let path = arg(&mut i);
-                let contents = fs::read_to_string(&path).unwrap_or_else(|e| {
-                    exit(CrateError::io(format!("cannot read '{path}'"), e).report())
-                });
-                rest.extend(["--argstr".to_string(), name, contents]);
-            }
-            "--arg-from-stdin" => {
+            "--arg-from-file" | "--arg-from-stdin" => {
                 let flag = i;
                 let name = arg(&mut i);
-                let contents = io::read_to_string(io::stdin())
-                    .unwrap_or_else(|e| exit(CrateError::io("cannot read stdin", e).report()));
-                rest.extend(["--argstr".to_string(), name, contents.clone()]);
-                j.stdin_args.push((flag, contents));
+                let path = if s == "--arg-from-file" {
+                    arg(&mut i)
+                } else {
+                    String::new()
+                };
+                rest.extend(["--argstr".to_string(), name, path]);
+                sources.push((flag, rest.len() - 1));
             }
             "--include" => {
                 rest.push("-I".to_string());
@@ -157,6 +159,27 @@ fn parse_jobs_args(argv: &[String]) -> (JobsArgs, Vec<String>) {
             _ => rest.push(s.to_string()),
         }
         i += 1;
+    }
+    // The role can depend on a flag after the argument. Each evaluator
+    // reads its file operands, as getAutoArgs does in a nix-eval-jobs worker.
+    // Only stdin belongs to the collector; its workers have a protocol pipe.
+    for (flag, slot) in sources {
+        if argv[flag] == "--arg-from-stdin" {
+            let contents = io::read_to_string(io::stdin())
+                .unwrap_or_else(|e| exit(CrateError::io("cannot read stdin", e).report()));
+            j.stdin_args.push((flag, contents.clone()));
+            rest[slot] = contents;
+        } else if !j.collector() {
+            let path = &rest[slot];
+            rest[slot] = fs::read_to_string(path).unwrap_or_else(|e| {
+                let error = CrateError::io(format!("cannot read '{path}'"), e);
+                if j.worker {
+                    let out: Out = Arc::new(Mutex::new(Box::new(io::stdout())));
+                    exit(worker_error(&out, error.to_report()));
+                }
+                exit(error.report())
+            });
+        }
     }
     (j, rest)
 }
@@ -257,7 +280,7 @@ pub fn cmd_eval_jobs(argv: &[String]) -> i32 {
     // the process model is this command's own: the collector evaluates
     // nothing itself, and a worker is one evaluator thread with no cache. WASI
     // cannot start a worker, so it is always one process.
-    if !j.worker && j.max_memory > 0 && !cfg!(target_os = "wasi") {
+    if j.collector() {
         return jobs_collector(&worker_argv(argv, &j), a.workers, &j, &transport, t0);
     }
     let mut run = run_for(&a);
@@ -449,25 +472,26 @@ fn jobs_single(
     jobs_finish(&emitter, j, conn.as_mut(), inst_stats, t0)
 }
 
+fn worker_error(out: &Out, r: log::Report) -> i32 {
+    let (msg, code) = (r.text(), r.emit());
+    write_out(
+        out,
+        &format!(
+            "{{\"error\":{}}}",
+            String::from_utf8_lossy(&crate::jobs::line::json_str(&msg))
+        )
+        .into_bytes(),
+    );
+    code
+}
+
 /// A worker process under `--max-memory-size`: the root once, then
 /// `do` requests from the collector until `exit` or the limit.
 fn jobs_worker(ev: &mut Evaluator, a: EvalArgs, j: &JobsArgs, transport: &Transport) -> i32 {
     let out: Out = Arc::new(Mutex::new(Box::new(io::stdout())));
-    let fail = |out: &Out, r: log::Report| -> i32 {
-        let (msg, code) = (r.text(), r.emit());
-        write_out(
-            out,
-            &format!(
-                "{{\"error\":{}}}",
-                String::from_utf8_lossy(&crate::jobs::line::json_str(&msg))
-            )
-            .into_bytes(),
-        );
-        code
-    };
     let root = match jobs_root(ev, a, j) {
         Ok(r) => r,
-        Err(e) => return fail(&out, jobs::error_report(ev, &e)),
+        Err(e) => return worker_error(&out, jobs::error_report(ev, &e)),
     };
     if ignored::nix_config_was_seen() {
         write_out(&out, MSG_NIX_CONFIG.as_bytes());
@@ -493,12 +517,12 @@ fn jobs_worker(ev: &mut Evaluator, a: EvalArgs, j: &JobsArgs, transport: &Transp
                     }),
                 ))
             }
-            Err(e) => return fail(&out, e.to_report()),
+            Err(e) => return worker_error(&out, e.to_report()),
         }
     };
     match run_worker(ev, root, inst, j.max_memory, &out) {
         Ok(()) => 0,
-        Err(e) => fail(&out, e.to_report()),
+        Err(e) => worker_error(&out, e.to_report()),
     }
 }
 
